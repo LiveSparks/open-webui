@@ -24,6 +24,14 @@ _Avoid_: terminal binding (terminal is the legacy surface name, binding is the r
 One of the distinct places the chat agent's code can run: the user's browser (sandboxed pyodide), the server's Jupyter engine, or the selected machine. Each differs in isolation and in how far its effects reach; the agent is told which one it is using.
 _Avoid_: code interpreter (that names the rendered presentation, not the place code runs)
 
+**Agent-authored artifact**:
+A workspace artifact the chat agent created or edited while acting as the driving user. It is owned by that user, starts private (no grants, never global), and follows the same permission checks as a human write.
+_Avoid_: agent workspace (implies a separate realm), bot content
+
+**Tombstone**:
+The soft-delete record on a workspace artifact. It hides the artifact from every listing and read, is purged after 30 days, and can be restored by anyone who could edit the artifact, rolling back with its history intact.
+_Avoid_: trash (implies an indefinite holding area), hard delete (that's what the tombstone replaces).
+
 **Steering**:
 Injecting a user message into an in-flight agent run so it is addressed after the current assistant turn, instead of stopping the run. In this project, steering replaces interrupt as the send-during-generation behavior.
 _Avoid_: queueing a message (that is the separate queue-locked path)
