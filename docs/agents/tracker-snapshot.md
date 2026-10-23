@@ -69,12 +69,14 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 2. **Sync tool offload** (`patches/tools.py.patch`). Upstream runs plain-Python (non-async) tool functions directly on the event loop, so a tool that makes a blocking call back to the OWUI server itself deadlocks a single-worker uvicorn. The patch offloads sync tools to a worker thread (`asyncio.to_thread`). Status in 0.12.3: still broken (`backend/open_webui/utils/tools.py:319` runs sync tools on the loop; `backend/open_webui/utils/middleware.py:1134` awaits tool calls on the loop). Home in the new design: a guard the tool bridge must carry, since OWUI keeps executing bridged Python tools.
 
 
+- [Agent-authored workspace: what the pi agent may create, edit, and delete](https://github.com/LiveSparks/open-webui/issues/12): the agent authors Tools, Prompts, Skills and Knowledge **as its driving user** — the user's permission is the gate, artifacts start user-owned and private, no approval cards; Models read-only, Functions closed; deletes are 30-day tombstones with restore and full edit history (Knowledge included). Recorded in [ADR 0003](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0003-agent-authored-workspace.md); KB write tools join direct exposure (amendment posted on the tool-bridge ticket).
+
 
 ## Tickets
 
 ### open #21 — How pi supports opencode go and what OWUI must supply for it
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/21) `wayfinder:research` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/21) `wayfinder:research` assignees: LiveSparks
 
 ## Question
 
@@ -186,7 +188,7 @@ Research question: pi-continuous-learning (MattDevy/pi-extensions) runs on pi an
 
 Deliverable: a research note on branch `research/self-learning`, findings gist posted here, then closed.
 
-### open #12 — Agent-authored workspace: what the pi agent may create, edit, and delete
+### closed #12 — Agent-authored workspace: what the pi agent may create, edit, and delete
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/12) `wayfinder:grilling` assignees: LiveSparks
 
