@@ -113,7 +113,7 @@ Feeds [Thinking effort as a dropdown beside the model picker](https://github.com
 
 ### open #20 — Thinking effort as a dropdown beside the model picker
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/20) `wayfinder:grilling` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/20) `wayfinder:grilling` assignees: LiveSparks
 
 ## Question
 
@@ -124,7 +124,7 @@ Part of the map (thinking-effort facts for opencode go hang on [How pi supports 
 
 ### open #19 — Sub-agent UI: live follow view, steering, and the running-sub-agents card
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/19) `wayfinder:prototype` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/19) `wayfinder:prototype` assignees: LiveSparks
 
 ## Question
 
@@ -193,7 +193,7 @@ Open WebUI lets a user connect their own tool servers (per-user direct connectio
 
 ### open #14 — What does self-learning mean for the OWUI agent: lessons, skills, and tools it writes for itself
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/14) `wayfinder:grilling` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/14) `wayfinder:grilling` assignees: LiveSparks
 
 ## Question
 
