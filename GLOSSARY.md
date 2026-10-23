@@ -16,6 +16,10 @@ _Avoid_: admin panel (workspace items are user-visible, not admin-only)
 The per-turn, server-resolved link between a pi session and exactly one selected machine. The backend owns it; the model never sees or chooses it; with no machine selected the local tools are absent.
 _Avoid_: terminal binding (terminal is the legacy surface name, binding is the relationship)
 
+**Execution surface**:
+One of the distinct places the chat agent's code can run: the user's browser (sandboxed pyodide), the server's Jupyter engine, or the selected machine. Each differs in isolation and in how far its effects reach; the agent is told which one it is using.
+_Avoid_: code interpreter (that names the rendered presentation, not the place code runs)
+
 **Steering**:
 Injecting a user message into an in-flight agent run so it is addressed after the current assistant turn, instead of stopping the run. In this project, steering replaces interrupt as the send-during-generation behavior.
 _Avoid_: queueing a message (that is the separate queue-locked path)
