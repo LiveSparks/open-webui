@@ -10,5 +10,5 @@ The agent's built-in tools (bash, read, edit, write) never run on the sidecar. E
 ## Consequences
 
 - The loopback executor endpoint is a new OWUI backend surface, on top of the MCP tool bridge.
-- Per-user direct tool-server connections do not bind pi's local tools in phase 1 (follow-up ticket on the map).
+- Per-user direct tool-server connections never bind pi's local tools in this effort. They cannot, technically: the loopback route presumes backend-held credentials, and a direct connection's key lives in the user's browser. A second executor route through the browser was rejected (resolved in the per-user direct connections ticket); their ordinary tools still bridge into the loop with execution relayed to the user's browser.
 - Nothing agent-facing persists on the sidecar; its data directory holds session state only.
