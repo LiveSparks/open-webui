@@ -45,6 +45,8 @@ Standing preference — plain language, everywhere: all communication with the h
 - [Mapping OWUI's native sub-agents onto pi's loop](https://github.com/LiveSparks/open-webui/issues/10): `delegate_task` stays the tool contract; the sidecar spawns each delegation as a second in-process pi session (recursion banned, memory-mutating tools stripped, knobs OWUI-owned and fetched at delegation start); background children now inherit machine tools like foreground ones (deliberate change); live follow in both the delegation card and the child chat over one stream; enqueue-only steering from sub-agent views; new running-sub-agents card above the composer; background results return through the unchanged `process_pending_internal_messages` flow.
 - [Code interpreter at day one: pi built-in vs bridged OWUI interpreter](https://github.com/LiveSparks/open-webui/issues/11): day-one code execution runs through bridged `execute_code` (direct exposure per the tool-bridge decision); the FastAPI translation special-cases its results into the native `open_webui:code_interpreter` item ("Analyzed" block, streamed code deltas, stdout/stderr/result, base64 image extraction); pi built-ins stay machine-bound and coexist, no phase-1 steering; a phase-1 system-prompt section tells the agent which execution surface it used, where it runs, and how isolated its effects are (new glossary term `execution surface`); pyodide rides on the bridge delivering the browser `execute:python` event-call, Jupyter otherwise; glossary change committed on branch `research/pi-durable-compat`.
 
+- [Binding per-user direct tool-server connections to pi](https://github.com/LiveSparks/open-webui/issues/15): direct OpenAPI tools bridge day one with execution relayed to the user's browser over the existing Socket.IO event, keys browser-held; pi's built-ins never bind a browser-held connection (browser-relay route rejected as live-browser-only), relay failures translate the ordinary way, ownership per-user and context per-chat.
+
 ## Not yet specified
 
 <!-- in-scope fog, graduation slot -->
@@ -67,7 +69,30 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 2. **Sync tool offload** (`patches/tools.py.patch`). Upstream runs plain-Python (non-async) tool functions directly on the event loop, so a tool that makes a blocking call back to the OWUI server itself deadlocks a single-worker uvicorn. The patch offloads sync tools to a worker thread (`asyncio.to_thread`). Status in 0.12.3: still broken (`backend/open_webui/utils/tools.py:319` runs sync tools on the loop; `backend/open_webui/utils/middleware.py:1134` awaits tool calls on the loop). Home in the new design: a guard the tool bridge must carry, since OWUI keeps executing bridged Python tools.
 
 
+
 ## Tickets
+
+### open #21 — How pi supports opencode go and what OWUI must supply for it
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/21) `wayfinder:research` assignees: none
+
+## Question
+
+Open WebUI has no native support for the opencode go provider; the driving human uses it. pi already ships it: pi-ai has an `opencode-go` provider, and each request carries an `x-opencode-session` header — a session id alongside every message. Verify the support shape against pi-ai: which APIs it speaks, which models and thinking levels it offers, how the key authenticates, and what the session header means over a conversation. Then state what the OWUI integration needs: where the key lives (the map's rule is OWUI keeps credential authority) and whether the session id maps cleanly onto the one-chat-one-pi-session rule or needs its own id. Deliverable: the facts the provider-integration decision hangs on, not the decision itself.
+
+Feeds [Thinking effort as a dropdown beside the model picker](https://github.com/LiveSparks/open-webui/issues/20), whose provider-capability facts depend on it.
+
+
+### open #20 — Thinking effort as a dropdown beside the model picker
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/20) `wayfinder:grilling` assignees: none
+
+## Question
+
+pi speaks thinking levels natively: off, minimal, low, medium, high, xhigh, max, limited to what the chosen model supports. Open WebUI today offers effort selection as free text among a sea of parameters, which reads as unusable. Decide how the chat UI picks thinking effort as a **dropdown beside the model picker**: how the choice rides through the request and the event bridge into the pi session, what a saved chat remembers when the user changes model, and which models show the control at all (model capability, per provider). The driving human's providers are OpenRouter and opencode go, so their capability facts matter most.
+
+Part of the map (thinking-effort facts for opencode go hang on [How pi supports opencode go and what OWUI must supply for it](https://github.com/LiveSparks/open-webui/issues/21)).
+
 
 ### open #19 — Sub-agent UI: live follow view, steering, and the running-sub-agents card
 
@@ -79,7 +104,7 @@ Prototype the sub-agent UI surfaces so the shapes can be reacted to before build
 
 ### open #18 — Delegation mechanics in the sidecar: spawning, limits, and crash behavior
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/18) `wayfinder:grilling` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/18) `wayfinder:grilling` assignees: LiveSparks
 
 ## Question
 
@@ -127,9 +152,9 @@ This ticket establishes the compatibility facts, not the decision:
 
 Findings saved as a research file under `research/` on this repo (pushed branch `research/pi-durable-compat`, no PR), with a context pointer comment on the ticket.
 
-### open #15 — Binding per-user direct tool-server connections to pi
+### closed #15 — Binding per-user direct tool-server connections to pi
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/15) `wayfinder:grilling` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/15) `wayfinder:grilling` assignees: LiveSparks
 
 ## Question
 
@@ -163,7 +188,7 @@ Deliverable: a research note on branch `research/self-learning`, findings gist p
 
 ### open #12 — Agent-authored workspace: what the pi agent may create, edit, and delete
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/12) `wayfinder:grilling` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/12) `wayfinder:grilling` assignees: LiveSparks
 
 ## Question
 
