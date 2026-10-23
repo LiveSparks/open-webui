@@ -50,7 +50,8 @@ Standing preference — plain language, everywhere: all communication with the h
 - [Delegation mechanics in the sidecar: spawning, limits, and crash behavior](https://github.com/LiveSparks/open-webui/issues/18): child = in-process session with the parent's model, system messages, admin sub-agent prompt, and the task text; tool set is the full bridge minus delegation and memory mutation. Children pin their first machine and can change it by hand from their view (next turn, stored on the chat record, fail closed if gone), a deliberate deviation recorded in ADR 0002. Limit asymmetry kept (foreground waits, background errors instantly naming the knob); max_iterations is now a finishTurn hook with its default raised 30 to 256; max_output truncates the summary copy. Child events stream unthrottled at the source, card throttle owned by the sub-agent UI ticket. Stop does not cancel background children (chat delete does); a sidecar crash takes children too.
 
 - [How pi supports opencode go and what OWUI must supply for it](https://github.com/LiveSparks/open-webui/issues/21): pi-ai ships a native `opencode-go` provider over one gateway, with the required `x-opencode-session` header injected automatically from pi's own session id (stable per chat, changes only on fork); key flows through pi's `getApiKey` seam, so OWUI keeps credential authority and must not let the sidecar read `OPENCODE_API_KEY`; the local `open-code-go-proxy` reverse proxy becomes reference-only because the sidecar needs it not. Facts in `docs/research/opencode-go-provider.md`.
-- [Agent-authored workspace: what the pi agent may create, edit, and delete](https://github.com/LiveSparks/open-webui/issues/12): the agent authors Tools, Prompts, Skills and Knowledge **as its driving user** — the user's permission is the gate, artifacts start user-owned and private, no approval cards; Models read-only, Functions closed; deletes are 30-day tombstones with restore and full edit history (Knowledge included). Recorded in [ADR 0003](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0003-agent-authored-workspace.md); KB write tools join direct exposure (amendment posted on the tool-bridge ticket).
+
+- [What does self-learning mean for the OWUI agent: lessons, skills, and tools it writes for itself](https://github.com/LiveSparks/open-webui/issues/14): a continuous loop in the sidecar — observe turns into a 30-day scrubbed log, reflect post-turn async on an admin-configured cheap model, inject per turn by retrieval (lessons embedded in OWUI's own vector store, queried on the user's message plus session activity; mature lessons always-on; relevance floor, char budget) — with lessons, skill edits, and tool writes all agent-authored as the driving user, scoped per user, never cross-user; guards are validation at write + client-side confidence ledger + evidence doctrine, no approval cards; invocation of graduation gates auto-drafts Skills; caps are rot control; on by default with per-user and admin switches; no durable reflection runner (pi-durable stays set aside); judged by a per-user lesson list + admin aggregates. Recorded in [ADR 0004](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0004-agent-self-learning.md).- [Agent-authored workspace: what the pi agent may create, edit, and delete](https://github.com/LiveSparks/open-webui/issues/12): the agent authors Tools, Prompts, Skills and Knowledge **as its driving user** — the user's permission is the gate, artifacts start user-owned and private, no approval cards; Models read-only, Functions closed; deletes are 30-day tombstones with restore and full edit history (Knowledge included). Recorded in [ADR 0003](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0003-agent-authored-workspace.md); KB write tools join direct exposure (amendment posted on the tool-bridge ticket).
 
 
 - [Sub-agent UI: live follow view, steering, and the running-sub-agents card](https://github.com/LiveSparks/open-webui/issues/19): mixed prototype verdict — live delegation card is variant A (console tail of the child's last steps, steering input + queue counter at the card's foot, queued message surfaced as a one-line inline note); running-sub-agents card is variant B (list grouped "foreground · blocks the turn" vs "background", state pills and click-through to the child chat); machine takeover in the child chat is variant C (loud amber banner, one proper decision: applies next turn, stored on the child chat record). Prototype stays on throwaway branch `prototype/subagent-ui`.
@@ -61,7 +62,6 @@ Standing preference — plain language, everywhere: all communication with the h
 - Depth of feature bridging beyond core tools (filters/pipelines semantics, RAG re-ranking, image, voice, code-interpreter internals)
 - Testing & parity strategy: how a session proves chat niceties are unchanged
 - Packaging the Node runtime into OWUI's Docker/deployment
-- Self-learning rollout details not pinned by the design ticket: what the agent may learn (lesson records vs skill edits vs tool code), where artifacts live and at what scope, when reflection runs, which guards replace the reviewer swarm, whether learning persists across chats and users, and whether the reflection loop needs a durable task runner (pi-durable was evaluated and set aside for the chat spine in the harness decision)
 
 ## Out of scope
 
@@ -81,11 +81,12 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 
 
 
+
 ## Tickets
 
 ### open #22 — How OWUI hands a model, provider settings, and the API key to the sidecar
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/22) `wayfinder:grilling` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/22) `wayfinder:grilling` assignees: LiveSparks
 
 ## Question
 
@@ -194,7 +195,7 @@ Findings saved as a research file under `research/` on this repo (pushed branch 
 
 Open WebUI lets a user connect their own tool servers (per-user direct connections, resolved in the browser) alongside the admin-configured system machines. The machine-binding decision scoped phase 1 to admin-configured machines only. Should per-user direct connections ever bind pi's local tools (bash, read, edit, write), through the same rebind-and-loopback mechanism, and what auth and isolation changes does that need (per-user credentials, browser-resolved connectivity, per-user instead of per-chat scoping)? If yes, when?
 
-### open #14 — What does self-learning mean for the OWUI agent: lessons, skills, and tools it writes for itself
+### closed #14 — What does self-learning mean for the OWUI agent: lessons, skills, and tools it writes for itself
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/14) `wayfinder:grilling` assignees: LiveSparks
 
