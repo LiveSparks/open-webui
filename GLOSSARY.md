@@ -19,3 +19,7 @@ _Avoid_: terminal binding (terminal is the legacy surface name, binding is the r
 **Steering**:
 Injecting a user message into an in-flight agent run so it is addressed after the current assistant turn, instead of stopping the run. In this project, steering replaces interrupt as the send-during-generation behavior.
 _Avoid_: queueing a message (that is the separate queue-locked path)
+
+**Thinking level**:
+How strongly a model reasons before answering. Pi's ladder runs off, minimal, low, medium, high, xhigh, max, limited to what the chosen model supports. It is a session setting applied between turns; the chat UI picks it in a dropdown beside the model picker and OWUI stores it as the effort param.
+_Avoid_: reasoning effort (the storage key, not the concept); thinking budget (how pi maps a level onto one provider's wire format, not the user-facing idea)

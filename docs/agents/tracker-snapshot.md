@@ -56,6 +56,8 @@ Standing preference — plain language, everywhere: all communication with the h
 
 - [Sub-agent UI: live follow view, steering, and the running-sub-agents card](https://github.com/LiveSparks/open-webui/issues/19): mixed prototype verdict — live delegation card is variant A (console tail of the child's last steps, steering input + queue counter at the card's foot, queued message surfaced as a one-line inline note); running-sub-agents card is variant B (list grouped "foreground · blocks the turn" vs "background", state pills and click-through to the child chat); machine takeover in the child chat is variant C (loud amber banner, one proper decision: applies next turn, stored on the child chat record). Prototype stays on throwaway branch `prototype/subagent-ui`.
 
+- [Thinking effort as a dropdown beside the model picker](https://github.com/LiveSparks/open-webui/issues/20): composer dropdown hides for non-thinking models; sidecar serves per-model level lists from pi catalogs onto model metadata; existing `effort` param carries the choice per turn into between-turn session state; model switch rounds and stores via pi's rule; free-text editor replaced on all six surfaces; no took-effect pill on day one.
+
 ## Not yet specified
 
 <!-- in-scope fog, graduation slot -->
@@ -75,6 +77,7 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 
 1. **Per-chat terminal memory** (one feature across `patches/middleware.py.patch` + two frontend bundle patches). A saved chat remembers which terminal it used: the backend saves a changed terminal id on the chat record when a message arrives (with `touch=False` so sidebar ordering doesn't jump), the frontend writes the switch back through the ordinary chat-update API, and reopening a chat restores its terminal from the record, falling back to the last message's `meta.terminal_id`. Status in 0.12.3: still absent; restore comes from browser-global localStorage only (`src/routes/(app)/+layout.svelte:431`), `terminal_id` is recorded per message but never on the chat, and models can pin a scoped default terminal (`backend/open_webui/routers/models.py:950`, applied in `Chat.svelte:1232`). Home in the new design: the machine-binding story (chat remembers its machine, restored on open).
 2. **Sync tool offload** (`patches/tools.py.patch`). Upstream runs plain-Python (non-async) tool functions directly on the event loop, so a tool that makes a blocking call back to the OWUI server itself deadlocks a single-worker uvicorn. The patch offloads sync tools to a worker thread (`asyncio.to_thread`). Status in 0.12.3: still broken (`backend/open_webui/utils/tools.py:319` runs sync tools on the loop; `backend/open_webui/utils/middleware.py:1134` awaits tool calls on the loop). Home in the new design: a guard the tool bridge must carry, since OWUI keeps executing bridged Python tools.
+
 
 
 
@@ -115,7 +118,7 @@ Open WebUI has no native support for the opencode go provider; the driving human
 Feeds [Thinking effort as a dropdown beside the model picker](https://github.com/LiveSparks/open-webui/issues/20), whose provider-capability facts depend on it.
 
 
-### open #20 — Thinking effort as a dropdown beside the model picker
+### closed #20 — Thinking effort as a dropdown beside the model picker
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/20) `wayfinder:grilling` assignees: LiveSparks
 
