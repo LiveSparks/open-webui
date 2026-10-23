@@ -25,6 +25,8 @@ Decisions locked in the charting session:
 
 Skills every session should consult: read `GLOSSARY.md` and `docs/adr/` per `docs/agents/domain.md`; use the research skill for external facts.
 
+Standing preference — snapshot durability: the map and its tickets are committed to git as a backup after every change. After any edit to the map body or any ticket, run `docs/agents/tracker-snapshot.sh` (lives on the \`tracker/snapshot\` branch) and commit the regenerated \`docs/agents/tracker-snapshot.md\` to that branch, then push. Read the snapshot only when the tracker is unavailable; GitHub issues stay the canonical copy.
+
 Standing preference — plain language, everywhere: all communication with the human and all prose written into the repo (tickets, specs, comments, docs, code) must read like one person talking plainly to another. No jargon, no shorthand, no walls of linked numbers. If a technical term carries real weight (a glossary term, a package name), say it once and explain it in everyday words next to it. Applies to replies, narration, and code comments alike; for tickets in particular, prefer short sentences a non-engineer could follow.
 
 ## Decisions so far
@@ -52,6 +54,7 @@ Standing preference — plain language, everywhere: all communication with the h
 <!-- consciously ruled out -->
 
 - Phase-2 event-bridge tier: stream filters, loop-result images, autocomplete/MoA (ruled out of _this_ effort by the day-one tier decision in #2; re-enters only if the destination is redrawn). Verify-only surfaces (automations, timers, channels, admin/observability) get no new bridge work.
+
 
 
 ## Tickets
