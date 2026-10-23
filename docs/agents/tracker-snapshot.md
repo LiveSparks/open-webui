@@ -47,6 +47,10 @@ Standing preference — plain language, everywhere: all communication with the h
 
 - [Binding per-user direct tool-server connections to pi](https://github.com/LiveSparks/open-webui/issues/15): direct OpenAPI tools bridge day one with execution relayed to the user's browser over the existing Socket.IO event, keys browser-held; pi's built-ins never bind a browser-held connection (browser-relay route rejected as live-browser-only), relay failures translate the ordinary way, ownership per-user and context per-chat.
 
+- [Delegation mechanics in the sidecar: spawning, limits, and crash behavior](https://github.com/LiveSparks/open-webui/issues/18): child = in-process session with the parent's model, system messages, admin sub-agent prompt, and the task text; tool set is the full bridge minus delegation and memory mutation. Children pin their first machine and can change it by hand from their view (next turn, stored on the chat record, fail closed if gone), a deliberate deviation recorded in ADR 0002. Limit asymmetry kept (foreground waits, background errors instantly naming the knob); max_iterations is now a finishTurn hook with its default raised 30 to 256; max_output truncates the summary copy. Child events stream unthrottled at the source, card throttle owned by the sub-agent UI ticket. Stop does not cancel background children (chat delete does); a sidecar crash takes children too.
+
+- [How pi supports opencode go and what OWUI must supply for it](https://github.com/LiveSparks/open-webui/issues/21): pi-ai ships a native `opencode-go` provider over one gateway, with the required `x-opencode-session` header injected automatically from pi's own session id (stable per chat, changes only on fork); key flows through pi's `getApiKey` seam, so OWUI keeps credential authority and must not let the sidecar read `OPENCODE_API_KEY`; the local `open-code-go-proxy` reverse proxy becomes reference-only because the sidecar needs it not. Facts in `docs/research/opencode-go-provider.md`.
+
 ## Not yet specified
 
 <!-- in-scope fog, graduation slot -->
@@ -72,9 +76,31 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 - [Agent-authored workspace: what the pi agent may create, edit, and delete](https://github.com/LiveSparks/open-webui/issues/12): the agent authors Tools, Prompts, Skills and Knowledge **as its driving user** — the user's permission is the gate, artifacts start user-owned and private, no approval cards; Models read-only, Functions closed; deletes are 30-day tombstones with restore and full edit history (Knowledge included). Recorded in [ADR 0003](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0003-agent-authored-workspace.md); KB write tools join direct exposure (amendment posted on the tool-bridge ticket).
 
 
+
+
 ## Tickets
 
-### open #21 — How pi supports opencode go and what OWUI must supply for it
+### open #22 — How OWUI hands a model, provider settings, and the API key to the sidecar
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/22) `wayfinder:grilling` assignees: none
+
+## Question
+
+Open WebUI keeps credential authority; the pi sidecar is the loop. Between those two sits an unmade decision: how, per chat and per turn, the OWUI backend hands the sidecar the three things a request needs — the chosen model, that model's provider settings, and the API key.
+
+What needs deciding (HITL — tradeoffs between convenience and control are judgment calls):
+
+- Does the session get its model and key once at creation, or freshly resolved every turn so an admin can rotate a provider key live?
+- How does OWUI express the model to pi (pi's `model.provider/model.id` pair, a custom provider object, or a pre-registered provider), and where do OpenAI-compatible custom connections like OpenRouter live in that expression?
+- Does the key cross the boundary per request over the sidecar's signal route (how the map's signed-binding pattern applies to credentials), or does an escaped env-var style handle persist for the session's life?
+- What happens when the provider or credentials fail — who reports, and how does a mid-chat provider change ride through (same code path as the edit-resend fork)?
+
+Facts already fixed: pi's agent takes a `getApiKey` runtime option and pi-ai resolves credentials through it; `opencode-go` sends its own session header (see the closed research ticket above); OpenRouter and opencode go are the driving human's day-one providers.
+
+Feeds the implementation run directly, and neighbors the model-picker work in the ticket above.
+
+
+### closed #21 — How pi supports opencode go and what OWUI must supply for it
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/21) `wayfinder:research` assignees: LiveSparks
 
@@ -104,7 +130,10 @@ Part of the map (thinking-effort facts for opencode go hang on [How pi supports 
 
 Prototype the sub-agent UI surfaces so the shapes can be reacted to before building. The behaviors are decided (live follow in the delegation card and child chat; enqueue-only steering from either view; running-sub-agents card above the composer with count + per-delegation rows that navigate to the child chat). What needs a concrete artifact: how the live delegation card presents the child's activity (tail? full transcript? streaming status lines?), what the steering affordance looks like while a child runs, and the running-sub-agents card's layout and states (pending/running/steered/done, foreground vs background rows). Frontend is Svelte and the pending-approval card above the composer is the existing pattern to extend. Skew toward the cheapest artifact that lets a human steer the design.
 
-### open #18 — Delegation mechanics in the sidecar: spawning, limits, and crash behavior
+The delegation-mechanics ticket added one surface to this ticket: the machine takeover in the child's own view. The mechanics are decided there (change applies next turn, stored on the child chat's record, restored on open, fail closed if the machine is gone). What needs an artifact here: where the takeover control lives in the child view and what it looks like while a child is running, folded into the same prototype.
+
+
+### closed #18 — Delegation mechanics in the sidecar: spawning, limits, and crash behavior
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/18) `wayfinder:grilling` assignees: LiveSparks
 
