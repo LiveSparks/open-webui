@@ -20,6 +20,10 @@ _Avoid_: per-user tool server (same thing; "direct" is the product's name)
 The per-turn, server-resolved link between a pi session and exactly one selected machine. The backend owns it; the model never sees or chooses it; with no machine selected the local tools are absent.
 _Avoid_: terminal binding (terminal is the legacy surface name, binding is the relationship)
 
+**Pinned machine**:
+The machine a child session starts with and keeps for its whole life. Chosen at spawn from the parent chat, changed only by hand from that child's own view. Deliberately unlike the parent's per-turn machine binding.
+_Avoid_: child binding (the session holds a machine, it does not acquire a new binding rule)
+
 **Execution surface**:
 One of the distinct places the chat agent's code can run: the user's browser (sandboxed pyodide), the server's Jupyter engine, or the selected machine. Each differs in isolation and in how far its effects reach; the agent is told which one it is using.
 _Avoid_: code interpreter (that names the rendered presentation, not the place code runs)
