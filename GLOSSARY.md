@@ -39,3 +39,19 @@ _Avoid_: trash (implies an indefinite holding area), hard delete (that's what th
 **Steering**:
 Injecting a user message into an in-flight agent run so it is addressed after the current assistant turn, instead of stopping the run. In this project, steering replaces interrupt as the send-during-generation behavior.
 _Avoid_: queueing a message (that is the separate queue-locked path)
+
+**Lesson**:
+A short learned record the agent wrote for itself: a trigger (the shape of situation), an action, a confidence score, and the evidence it came from. Scope is per user and it is injected into later turns by retrieval, not by a fixed list.
+_Avoid_: instinct (pi-continuous-learning's word; same thing), fact (facts are declarative, lessons are situational).
+
+**Confidence ledger**:
+The numeric record of how much a lesson has been confirmed or contradicted by later turns, plus its weekly decay. Updated by the loop, never by the model that wrote the lesson.
+_Avoid_: rating, score alone (the ledger is the history, not one number).
+
+**Reflection**:
+The post-turn asynchronous job where a cheap model reads the observation log and proposes lesson writes, at least one machine-check per turn. It never runs inside the generation loop, and a mid-job crash just waits for the next run.
+_Avoid_: self-critique (implying the agent reflects on itself mid-turn).
+
+**Graduation**:
+The moment a lesson's ledger crosses the numeric gates (age, confidence, confirmations, contradictions) and the sidecar automatically drafts a Skill from it. The draft is an ordinary agent-authored artifact.
+_Avoid_: promotion (vague), consolidation (that is the periodic dedup pass).
