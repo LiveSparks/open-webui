@@ -50,6 +50,10 @@ Standing preference — plain language, everywhere: all communication with the h
 - [Delegation mechanics in the sidecar: spawning, limits, and crash behavior](https://github.com/LiveSparks/open-webui/issues/18): child = in-process session with the parent's model, system messages, admin sub-agent prompt, and the task text; tool set is the full bridge minus delegation and memory mutation. Children pin their first machine and can change it by hand from their view (next turn, stored on the chat record, fail closed if gone), a deliberate deviation recorded in ADR 0002. Limit asymmetry kept (foreground waits, background errors instantly naming the knob); max_iterations is now a finishTurn hook with its default raised 30 to 256; max_output truncates the summary copy. Child events stream unthrottled at the source, card throttle owned by the sub-agent UI ticket. Stop does not cancel background children (chat delete does); a sidecar crash takes children too.
 
 - [How pi supports opencode go and what OWUI must supply for it](https://github.com/LiveSparks/open-webui/issues/21): pi-ai ships a native `opencode-go` provider over one gateway, with the required `x-opencode-session` header injected automatically from pi's own session id (stable per chat, changes only on fork); key flows through pi's `getApiKey` seam, so OWUI keeps credential authority and must not let the sidecar read `OPENCODE_API_KEY`; the local `open-code-go-proxy` reverse proxy becomes reference-only because the sidecar needs it not. Facts in `docs/research/opencode-go-provider.md`.
+- [Agent-authored workspace: what the pi agent may create, edit, and delete](https://github.com/LiveSparks/open-webui/issues/12): the agent authors Tools, Prompts, Skills and Knowledge **as its driving user** — the user's permission is the gate, artifacts start user-owned and private, no approval cards; Models read-only, Functions closed; deletes are 30-day tombstones with restore and full edit history (Knowledge included). Recorded in [ADR 0003](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0003-agent-authored-workspace.md); KB write tools join direct exposure (amendment posted on the tool-bridge ticket).
+
+
+- [Sub-agent UI: live follow view, steering, and the running-sub-agents card](https://github.com/LiveSparks/open-webui/issues/19): mixed prototype verdict — live delegation card is variant A (console tail of the child's last steps, steering input + queue counter at the card's foot, queued message surfaced as a one-line inline note); running-sub-agents card is variant B (list grouped "foreground · blocks the turn" vs "background", state pills and click-through to the child chat); machine takeover in the child chat is variant C (loud amber banner, one proper decision: applies next turn, stored on the child chat record). Prototype stays on throwaway branch `prototype/subagent-ui`.
 
 ## Not yet specified
 
@@ -73,7 +77,6 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 2. **Sync tool offload** (`patches/tools.py.patch`). Upstream runs plain-Python (non-async) tool functions directly on the event loop, so a tool that makes a blocking call back to the OWUI server itself deadlocks a single-worker uvicorn. The patch offloads sync tools to a worker thread (`asyncio.to_thread`). Status in 0.12.3: still broken (`backend/open_webui/utils/tools.py:319` runs sync tools on the loop; `backend/open_webui/utils/middleware.py:1134` awaits tool calls on the loop). Home in the new design: a guard the tool bridge must carry, since OWUI keeps executing bridged Python tools.
 
 
-- [Agent-authored workspace: what the pi agent may create, edit, and delete](https://github.com/LiveSparks/open-webui/issues/12): the agent authors Tools, Prompts, Skills and Knowledge **as its driving user** — the user's permission is the gate, artifacts start user-owned and private, no approval cards; Models read-only, Functions closed; deletes are 30-day tombstones with restore and full edit history (Knowledge included). Recorded in [ADR 0003](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0003-agent-authored-workspace.md); KB write tools join direct exposure (amendment posted on the tool-bridge ticket).
 
 
 
@@ -122,7 +125,7 @@ pi speaks thinking levels natively: off, minimal, low, medium, high, xhigh, max,
 Part of the map (thinking-effort facts for opencode go hang on [How pi supports opencode go and what OWUI must supply for it](https://github.com/LiveSparks/open-webui/issues/21)).
 
 
-### open #19 — Sub-agent UI: live follow view, steering, and the running-sub-agents card
+### closed #19 — Sub-agent UI: live follow view, steering, and the running-sub-agents card
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/19) `wayfinder:prototype` assignees: LiveSparks
 
