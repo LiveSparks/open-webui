@@ -1,0 +1,395 @@
+<!doctype html>
+<!--
+  PROTOTYPE - throwaway - for wayfinder ticket "Sub-agent UI: live follow view, steering,
+  and the running-sub-agents card". Not production code. Not wired to any backend.
+
+  Three variants of the sub-agent UI surfaces, switchable via the floating bottom bar
+  (arrow keys or click). Each variant covers the same four surfaces:
+
+    1. the live delegation card in the parent chat
+    2. the running-sub-agents card above the composer
+    3. the steering affordance (enqueue-only, from both views)
+    4. the machine takeover control in the child chat
+
+  The "Parent chat" / "Child chat" toggle (top right) flips between the two views.
+  Every state the ticket names is shown side by side: foreground/background rows,
+  pending/running/steered/done states.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE - sub-agent UI</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { color-scheme: dark; }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  @keyframes blink { 0%,49% {opacity:1} 50%,100% {opacity:0} }
+  .cursor { display:inline-block; width:.5em; height:1em; background:#9ca3af; vertical-align:-.15em; animation:blink 1s step-end infinite; }
+  .fade-out { opacity:.25; }
+  .tl-line { position:absolute; left:9px; top:14px; bottom:-8px; width:1px; background:rgba(255,255,255,.09); }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-thumb { background:rgba(255,255,255,.12); border-radius:4px; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-200 antialiased overflow-hidden">
+
+<!-- fake app header -->
+<header class="h-11 flex items-center justify-between px-3 border-b border-white/[0.06] bg-gray-950/90">
+  <div class="flex items-center gap-2 text-sm">
+    <span class="opacity-60">Open WebUI &rsaquo;</span>
+    <span id="headerTitle" class="truncate max-w-[40ch]"></span>
+  </div>
+  <div class="flex items-center gap-1 text-xs">
+    <button id="viewParent" class="px-2.5 py-1 rounded-md bg-white/10">Parent chat</button>
+    <button id="viewChild" class="px-2.5 py-1 rounded-md text-gray-400 hover:bg-white/5">Child chat</button>
+  </div>
+</header>
+
+<main id="app" class="flex flex-col" style="height: calc(100vh - 3rem)"></main>
+
+<!-- floating variant switcher -->
+<div class="fixed bottom-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1 rounded-full bg-white text-gray-900 shadow-lg shadow-black/40 px-1.5 py-1 text-xs font-medium">
+  <button id="prevV" class="size-6 rounded-full hover:bg-black/10">←</button>
+  <span id="variantLabel" class="px-2 tabular-nums"></span>
+  <button id="nextV" class="size-6 rounded-full hover:bg-black/10">→</button>
+</div>
+
+<script>
+// ---------- mock data ----------
+
+const steeredNote = "Also check the test that asserts on the thread pool — mirror it.";
+
+const steps = [
+  { icon: "▸", verb: "bash", target: "pytest -k tool_offload -x -q",           post: "2 passed, 1 failed" },
+  { icon: "▸", verb: "bash", target: "pytest -k tool_offload -x -q  (again)",  post: "2 passed, 1 failed — flaky" },
+  { icon: "▣", verb: "read", target: "utils/tools.py", line: "line 319",       post: "sync tool runs on the event loop" },
+  { icon: "✎", verb: "edit", target: "utils/tools.py", line: "+3 −1",          post: "offload to worker thread" },
+  { icon: "▸", verb: "bash", target: "pytest -k tool_offload -x -q",           post: "running…" },
+];
+
+const machines = ["workstation-2  (admin)", "homelab-pi  (admin)", "None selected — tools absent"];
+
+const state = {
+  variant: "A",
+  view: "parent",
+  queuedParent: 1,
+  queuedChild: 0,
+  peeking: false,
+};
+
+// ---------- tiny helpers ----------
+
+function cardWrap(innerHTML, extra = "") {
+  return `<div class="rounded-xl border border-white/[0.07] bg-white/[0.02] ${extra}">${innerHTML}</div>`;
+}
+function statusPill(st) {
+  const map = {
+    running: "text-emerald-300 bg-emerald-400/10 border-emerald-300/20",
+    pending: "text-yellow-300 bg-yellow-400/10 border-yellow-300/20",
+    steered: "text-sky-300 bg-sky-400/10 border-sky-300/20",
+    done: "text-gray-400 bg-white/[0.04] border-white/10",
+  };
+  return `<span class="text-[0.65rem] px-1.5 py-px rounded-full border ${map[st]}">${st}</span>`;
+}
+function spinner() {
+  return `<svg class="size-3.5 animate-spin text-emerald-300" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity=".25"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>`;
+}
+
+// ---------- surface 1: delegation card, per variant ----------
+
+function delegationCardA() {
+  const tail = steps.slice(-5).map((s, i, a) =>
+    `<div class="flex gap-2 px-3 ${i === a.length - 1 ? "" : "fade-out"}">
+       <span class="text-gray-500 shrink-0">${s.icon}</span>
+       <span class="text-gray-400 shrink-0 w-14">${s.verb}</span>
+       <span class="min-w-0 truncate text-gray-300 underline decoration-white/20 underline-offset-2 cursor-pointer">${s.target}</span>
+       <span class="ml-auto shrink-0 text-gray-500">${i === a.length - 1 ? "" : s.post}</span>
+     </div>`).join("");
+  return cardWrap(`
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">
+      ${spinner()}
+      <span class="text-sm font-medium">Delegating · flaky test hunt</span>
+      <span class="text-[0.65rem] text-gray-500 mono">#d-31</span>
+      ${statusPill("running")}
+      <span class="ml-auto text-[0.7rem] text-gray-500">01:12 · step 5</span>
+    </div>
+    <div class="py-1.5 text-[0.72rem] mono leading-relaxed">${tail}<div class="px-3"><span class="cursor"></span></div></div>
+    <div class="px-3 py-2 border-t border-white/[0.06] flex items-center gap-2">
+      <span class="${state.queuedParent ? "" : "hidden"} text-[0.65rem] text-sky-300 shrink-0">+${state.queuedParent} queued</span>
+      <input data-act="steer" placeholder="Message lands after the current step" class="flex-1 min-w-0 bg-transparent text-xs placeholder:text-gray-600 outline-none"/>
+      <button data-act="steer" class="text-[0.7rem] px-2 py-0.5 rounded-md bg-emerald-400/15 text-emerald-300">Enqueue</button>
+    </div>`);
+}
+
+function delegationCardB() {
+  const tl = steps.map((s, i, a) => {
+    const last = i === a.length - 1;
+    return `<div class="relative pl-6 pb-2.5">
+      <div class="tl-line ${last ? "hidden" : ""}"></div>
+      <span class="absolute left-1.5 top-0.5 size-3.5 rounded-full text-[0.6rem] grid place-items-center ${last ? "bg-emerald-400/20 text-emerald-300 ring-1 ring-emerald-300/30" : "bg-white/[0.06] text-gray-400"}">${s.icon}</span>
+      <div class="text-xs leading-snug">
+        <span class="text-gray-400">${s.verb}</span>
+        <span class="ml-1 ${last && s.verb === "bash" ? "text-gray-300 underline decoration-white/20 underline-offset-2 cursor-pointer" : "text-gray-300"}">${s.target}${s.line ? ` <span class="text-gray-600">${s.line}</span>` : ""}</span>
+        <span class="ml-2 text-gray-500">${last ? "" : s.post}</span>
+      </div>
+      ${last ? `<div class="mt-0.5 text-gray-600 text-[0.7rem]">waiting for result…</div>` : ""}
+    </div>`;
+  }).join("");
+  const queued = state.queuedParent
+    ? `<div class="relative pl-6 pb-2">
+         <div class="tl-line"></div>
+         <span class="absolute left-1.5 top-0.5 size-3.5 rounded-full bg-sky-400/20 text-sky-300 text-[0.6rem] grid place-items-center">＋</span>
+         <div class="text-xs text-sky-300/90">${steeredNote}</div>
+         <div class="text-[0.65rem] text-gray-600 mt-0.5">queued · delivered after the current step</div>
+       </div>`
+    : "";
+  return cardWrap(`
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">
+      ${spinner()}
+      <button data-act="expand" class="text-sm font-medium hover:text-white text-left">Delegating · flaky test hunt</button>
+      <span class="text-[0.65rem] text-gray-500 mono">#d-31</span>
+      ${statusPill("steered")}
+      <span class="ml-auto text-[0.7rem] text-gray-500">5 steps</span>
+    </div>
+    <div class="max-h-56 overflow-y-auto px-3 py-2"> ${tl} ${queued} </div>
+    <div class="px-3 py-2 border-t border-white/[0.06] flex items-center gap-2">
+      <span class="text-[0.65rem] text-sky-300 shrink-0">＋</span>
+      <input data-act="steer" placeholder="Add a step — it will be delivered after the current one" class="flex-1 min-w-0 bg-transparent text-xs placeholder:text-gray-600 outline-none"/>
+      <button data-act="steer" class="text-[0.7rem] px-2 py-0.5 rounded-md bg-sky-400/15 text-sky-300">Queue step</button>
+    </div>`);
+}
+
+function delegationCardC() {
+  return cardWrap(`
+    <div class="relative flex items-center gap-2 px-3 py-2" data-act="peek" onmouseenter="state.peeking=true;render()" onmouseleave="state.peeking=false;render()">
+      ${spinner()}
+      <span class="text-sm font-medium">Delegating · flaky test hunt</span>
+      <span class="text-[0.65rem] text-gray-500 mono">#d-31</span>
+      ${statusPill("running")}
+      <div class="ml-auto flex items-center gap-3 text-[0.7rem] text-gray-500">
+        <span>step 5 · 01:12</span>
+        <span class="truncate max-w-40 text-gray-400">bash · pytest -k tool_offload…</span>
+        <span class="size-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+      </div>
+      ${state.peeking ? `<div class="absolute right-2 top-full mt-1 z-10 w-80 rounded-lg border border-white/10 bg-gray-900 shadow-xl p-2 text-[0.72rem] mono leading-relaxed">
+        <div class="text-[0.6rem] uppercase tracking-wide text-gray-500 mb-1">last step</div>
+        <div class="text-gray-300">$ pytest -k tool_offload -x -q</div>
+        <div class="text-gray-500">2 passed, 1 failed <span class="cursor"></span></div>
+        <div class="mt-1 text-[0.65rem] text-gray-600">click card to open the child chat</div>
+      </div>` : ""}
+    </div>`);
+}
+
+// ---------- surface 2: running-sub-agents card, per variant ----------
+
+const runRows = [
+  { name: "flaky test hunt",   st: "running",  fg: true,  elapsed: "01:12" },
+  { name: "benchmark report",  st: "running",  fg: false, elapsed: "04:38" },
+  { name: "fix changelog typos", st: "steered", fg: false, elapsed: "02:20" },
+  { name: "draft release notes", st: "done",   fg: false, elapsed: "03:11", result: "meow ✓" },
+];
+
+function runCardA() {
+  return cardWrap(`
+    <div class="px-3 pt-2 pb-1 text-[0.7rem] text-gray-400 flex items-center gap-2">
+      <span class="font-semibold text-gray-300">2 sub-agents running</span>
+      <span class="text-gray-600">· 2 in background</span>
+    </div>
+    ${runRows.map((r) => `
+      <div class="flex items-center gap-2 px-3 py-1.5 hover:bg-white/[0.03] cursor-pointer group" data-act="open-child">
+        <span class="shrink-0">${r.st === "running" ? spinner() : r.st === "done" ? `<span class="text-emerald-400">✓</span>` : r.st === "steered" ? `<span class="size-2 rounded-full bg-sky-400 inline-block"></span>` : `<span class="size-2 rounded-full border border-gray-500 inline-block"></span>`}</span>
+        <span class="text-xs truncate ${r.st === "done" ? "text-gray-500" : ""}">${r.name}</span>
+        ${r.fg ? `<span class="text-[0.6rem] px-1 rounded-full border border-amber-300/25 text-amber-300/90 shrink-0">waiting on this</span>` : ""}
+        ${r.st === "steered" ? `<span class="text-[0.6rem] text-sky-300/80 shrink-0">+1 queued</span>` : ""}
+        ${r.st === "done" ? `<span class="text-[0.65rem] text-gray-500 truncate max-w-24 shrink-0">${r.result}</span>` : ""}
+        <span class="ml-auto text-[0.65rem] text-gray-600 mono shrink-0">${r.elapsed}</span>
+        <button data-act="open-child" class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-white transition shrink-0" title="open child chat">→</button>
+      </div>`).join("")}`);
+}
+
+function runCardB() {
+  const group = (label, rows, empty) => `
+    <div class="px-3 py-1">
+      <div class="text-[0.6rem] uppercase tracking-wide text-gray-500 mb-0.5">${label}</div>
+      ${rows.length ? rows.map((r) => `
+        <div class="relative flex items-center gap-2 py-1.5 pl-2.5 pr-2 rounded-md hover:bg-white/[0.03] cursor-pointer border-l-2 ${r.st === "running" ? "border-emerald-400/50" : r.st === "steered" ? "border-sky-400/50" : r.st === "done" ? "border-white/10" : "border-yellow-400/40"}" data-act="open-child">
+          <span class="text-xs truncate ${r.st === "done" ? "text-gray-500" : ""}">${r.name}</span>
+          <span class="text-[0.6rem] mono text-gray-600 ml-auto shrink-0">${r.elapsed}</span>
+          ${statusPill(r.st)}
+        </div>`).join("") : `<div class="text-[0.7rem] text-gray-600 py-1">${empty}</div>`}
+    </div>`;
+  return cardWrap(`
+    <div class="px-3 pt-2 text-[0.7rem] text-gray-400 flex items-center gap-2">
+      <span class="font-semibold text-gray-300">Sub-agents</span>
+      <span class="text-gray-600">1 waits on you · 3 run in background</span>
+    </div>
+    <div class="pt-1 pb-1 flex flex-col divide-y divide-white/[0.04]">
+      ${group("foreground · blocks the turn", runRows.filter((r) => r.fg), "none")}
+      ${group("background · report when done", runRows.filter((r) => !r.fg), "none")}
+    </div>`);
+}
+
+function runCardC() {
+  return cardWrap(`
+    <div class="px-3 pt-2 pb-1 flex items-center gap-2 text-[0.7rem] text-gray-400">
+      <span class="font-semibold text-gray-300">Sub-agents</span>
+      <span class="inline-flex gap-1 text-[0.65rem]">
+        <span class="px-1.5 rounded-full bg-emerald-400/10 text-emerald-300 border border-emerald-300/20">2 running</span>
+        <span class="px-1.5 rounded-full bg-white/[0.04] text-gray-400 border border-white/10">1 done</span>
+      </span>
+    </div>
+    <div class="px-3 pb-2 grid grid-cols-4 gap-1.5">
+      ${runRows.map((r) => `
+        <div data-act="open-child" class="rounded-lg border ${r.st === "done" ? "border-white/[0.06] opacity-60" : "border-white/[0.1]"} px-2 py-1.5 cursor-pointer hover:border-white/25 transition">
+          <div class="flex items-center gap-1.5">
+            ${r.st === "running" ? `<span class="size-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>` : r.st === "done" ? `<span class="text-emerald-400 text-[0.7rem]">✓</span>` : r.st === "steered" ? `<span class="size-2 rounded-full bg-sky-400 shrink-0"></span>` : `<span class="size-2 rounded-full border border-gray-500 shrink-0"></span>`}
+            <span class="text-[0.68rem] truncate">${r.name}</span>
+          </div>
+          <div class="mt-1 h-0.5 rounded-full bg-white/[0.07] overflow-hidden">
+            <div class="h-full ${r.st === "done" ? "w-full bg-emerald-400/60" : r.st === "steered" ? "w-2/3 bg-sky-400/60" : "w-1/3 bg-emerald-400/60 animate-pulse"}"></div>
+          </div>
+          <div class="mt-0.5 flex justify-between text-[0.6rem] mono text-gray-600">
+            <span>${r.fg ? "foreground" : "background"}</span>
+            <span>${r.elapsed}</span>
+          </div>
+        </div>`).join("")}
+    </div>`);
+}
+
+// ---------- surface 4: machine takeover + steering in the child view ----------
+
+function childRibbon() {
+  return `<div class="text-[0.7rem] text-gray-400 bg-white/[0.03] border-b border-white/[0.06] px-4 py-1.5 flex items-center gap-2">
+    <span class="text-gray-500">viewing</span> <span class="text-gray-300">child chat · “flaky test hunt” (#d-31)</span>
+    <span class="ml-auto text-gray-600">messages you send here are enqueued until the sub-agent finishes the current step</span>
+  </div>`;
+}
+
+function machineA() {
+  return `${childRibbon()}
+  <div class="px-4 py-2 border-b border-white/[0.06] flex items-center gap-2 text-xs">
+    <span class="text-gray-500">machine</span>
+    <button data-act="machine" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/[0.06] hover:bg-white/[0.12] text-gray-200 font-medium">
+      workstation-2 <span class="text-[0.6rem] text-gray-500">▾</span>
+    </button>
+    <span class="text-[0.65rem] text-gray-600">applies next turn · the sub-agent keeps its current machine while running</span>
+    <span class="ml-auto text-[0.65rem] text-gray-500 flex items-center gap-1">${spinner()} generating</span>
+  </div>`;
+}
+
+function machineB() {
+  const opts = machines.map((m, i) => `
+    <div class="flex items-center gap-2 px-2 py-1 rounded-md ${i === 0 ? "bg-white/[0.06] text-gray-200" : "text-gray-400 hover:bg-white/[0.04]"} cursor-pointer">
+      <span>${i === 0 ? "●" : "○"}</span><span class="text-xs">${m}</span>
+    </div>`).join("");
+  return `${childRibbon()}
+  <div class="px-4 py-2 border-b border-white/[0.06] flex items-center justify-between text-xs relative">
+    <button data-act="machine" class="flex items-center gap-2 text-gray-400 hover:text-gray-200">
+      <span class="text-[0.6rem] uppercase tracking-wide text-gray-500">execution · machine</span>
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white/[0.06] text-gray-200 font-medium">workstation-2 ▾</span>
+    </button>
+    <span class="text-[0.65rem] text-gray-600">a change while it runs is stored and applies at its next turn</span>
+    ${state.machineOpen ? `<div class="absolute top-full left-4 mt-1 z-20 w-72 rounded-lg border border-white/10 bg-gray-900 shadow-xl p-1.5">${opts}
+      <div class="px-2 pt-1 text-[0.6rem] text-gray-600">picked machines are stored on this child chat and restored when you reopen it</div></div>` : ""}
+  </div>`;
+}
+
+function machineC() {
+  return `${childRibbon()}
+  <div class="px-4 py-2 rounded-b-lg bg-amber-400/[0.06] border-b border-amber-300/15 flex items-center gap-2 text-xs">
+    <span class="text-amber-300">⤴</span>
+    <span>
+      <span class="text-amber-200/90 font-medium">Taking over from <span class="underline decoration-amber-300/30 underline-offset-2 decoration-dotted cursor-pointer" data-act="machine">workstation-2 ▾</span></span>
+      <span class="text-amber-200/50"> — while it runs, tools keep using this machine; your next message turns onto the new one</span>
+    </span>
+    <span class="ml-auto text-[0.65rem] text-gray-500 flex items-center gap-1">${spinner()} generating</span>
+  </div>`;
+}
+
+// ---------- composer (shared, view-aware) ----------
+
+function composer() {
+  const isChild = state.view === "child";
+  return `<div class="mt-auto px-4 pb-4 pt-2">
+    ${state.queuedParent && state.view === "parent" && state.variant !== "B" ? "" : ""}
+    <div class="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3 py-2.5 flex items-end gap-2">
+      ${isChild ? `<div class="flex items-center gap-2 text-xs text-sky-300/80 pb-1.5 shrink-0"><span>＋</span><span class="text-[0.7rem]">queued · delivered at next turn</span></div>` : ""}
+      <div class="flex-1 min-w-0 text-sm text-gray-500 py-0.5 ${isChild ? "pl-0" : ""}">${isChild ? "Message for the sub-agent…" : "Message Open WebUI…"}</div>
+      <button class="size-8 rounded-xl bg-white text-gray-900 grid place-items-center shrink-0">
+        <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </div>`;
+}
+
+// ---------- assemble views ----------
+
+function render() {
+  const v = state.variant;
+  const msg = `
+  <div class="flex flex-col gap-2 pt-4 px-4 text-sm">
+    <div class="flex justify-end"><div class="max-w-[60ch] rounded-2xl bg-blue-600/25 border border-blue-400/10 px-3.5 py-2 text-gray-200">The sync-tool offload test is flaky on main. Find out why and fix it.</div></div>
+    <div class="max-w-3xl">Sure — delegating the repro loop. I'll review its findings when it reports back.</div>
+    <div class="max-w-3xl">${{ A: delegationCardA, B: delegationCardB, C: delegationCardC }[v]()}</div>
+  </div>`;
+
+  if (state.view === "parent") {
+    app.innerHTML = `
+      <div class="flex-1 overflow-y-auto">${msg}</div>
+      <div class="px-4 pb-1">${{ A: runCardA, B: runCardB, C: runCardC }[v]()}</div>
+      ${composer()}`;
+    headerTitle.textContent = "blog-sprint · Sprint 12 planning";
+    viewParent.className = "px-2.5 py-1 rounded-md bg-white/10";
+    viewChild.className = "px-2.5 py-1 rounded-md text-gray-400 hover:bg-white/5";
+  } else {
+    app.innerHTML = `
+      <div class="flex-1 overflow-y-auto">
+        <div class="flex flex-col gap-2 pt-4 px-4 text-sm">
+          <div class="text-[0.7rem] text-gray-500">the sub-agent's own chat · tool calls stream here like any chat</div>
+          <div class="max-w-[60ch] rounded-2xl bg-blue-600/25 border border-blue-400/10 px-3.5 py-2 self-end text-gray-200">Track the flaky sync-tool test in utils/tools.py.</div>
+          <div class="text-gray-300">On it. Reproducing first…</div>
+        </div>
+      </div>
+      <div>${{ A: machineA, B: machineB, C: machineC }[v]()}</div>
+      ${composer()}`;
+    headerTitle.textContent = "child · “flaky test hunt” (#d-31)";
+    viewChild.className = "px-2.5 py-1 rounded-md bg-white/10";
+    viewParent.className = "px-2.5 py-1 rounded-md text-gray-400 hover:bg-white/5";
+  }
+
+  variantLabel.textContent = `${v} (${{ A: "Live tail", B: "Step timeline", C: "Peek + tiles" }[v]})`;
+}
+
+// ---------- wiring ----------
+
+let VARIANTS = ["A", "B", "C"];
+document.getElementById("prevV").onclick = () => cycle(-1);
+document.getElementById("nextV").onclick = () => cycle(1);
+function cycle(d) {
+  state.variant = VARIANTS[(VARIANTS.indexOf(state.variant) + d + 3) % 3];
+  state.machineOpen = false;
+  render();
+}
+document.getElementById("viewParent").onclick = () => { state.view = "parent"; render(); };
+document.getElementById("viewChild").onclick = () => { state.view = "child"; render(); };
+document.getElementById("viewMachine").onclick = () => { state.view = "child"; render(); };
+
+app.addEventListener("click", (e) => {
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (act === "steer" && state.view === "parent") { state.queuedParent += 1; render(); }
+  if (act === "machine") { state.machineOpen = !state.machineOpen; render(); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("input, textarea, [contenteditable]")) return;
+  if (e.key === "ArrowLeft") cycle(-1);
+  if (e.key === "ArrowRight") cycle(1);
+  if (e.key.toLowerCase() === "c") document.getElementById("viewChild").click();
+  if (e.key.toLowerCase() === "p") document.getElementById("viewParent").click();
+});
+
+render();
+</script>
+</body>
+</html>
