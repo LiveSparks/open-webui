@@ -65,9 +65,6 @@ Standing preference — plain language, everywhere: all communication with the h
 ## Not yet specified
 
 <!-- in-scope fog, graduation slot -->
-- Depth of feature bridging beyond core tools (filters/pipelines semantics, RAG re-ranking, image, voice, code-interpreter internals)
-- Testing & parity strategy: how a session proves chat niceties are unchanged
-- Packaging the Node runtime into OWUI's Docker/deployment
 
 ## Out of scope
 
@@ -91,7 +88,52 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 
 
 
+
 ## Tickets
+
+### open #26 — How the Node sidecar gets into Open WebUI's Docker image and deployment
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/26) `wayfinder:research` assignees: LiveSparks
+
+## Question
+
+The session-lifecycle ticket ([Session lifecycle and sidecar deployment shape](https://github.com/LiveSparks/open-webui/issues/9)) decided the sidecar is one backend-owned Node process, bundled in the Open WebUI image, with exact-pinned pi dependencies. It did not decide how the packaging actually happens. Answer four things.
+
+1. How is Open WebUI 0.12.3's Docker image built today: base images, build stages, where Node already appears (the frontend build), the startup entrypoint. Does a Node runtime survive into the final image, or only in build stages?
+2. How would the sidecar be built and pinned: where its package.json lives, how exact pinning of pi packages is enforced, whether it ships compiled or as TypeScript with a runtime.
+3. How the backend finds and starts the sidecar across deployment shapes: single container, docker-compose, Kubernetes, pip install. The env-var config and version handshake from the session-lifecycle decision need a concrete home.
+4. Propose the smallest packaging change that makes the sidecar present in every supported deployment without forking Open WebUI's Dockerfile more than necessary.
+
+The answer is facts about today's build plus a proposed packaging design.
+
+### open #25 — How an implementation session proves chat niceties are unchanged
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/25) `wayfinder:research` assignees: LiveSparks
+
+## Question
+
+The engine swap replaces Open WebUI's Python chat loop with pi. The day-one tier lists many features that must keep working exactly as before: streaming, tool calls, approvals, citations, files, title/tags/follow-ups, structured outputs, and more. Nothing on the map yet says how an implementation session proves it did not break them.
+
+Answer three things.
+
+1. What test coverage does Open WebUI 0.12.3 already have for chat behavior: backend pytest, frontend tests, the Playwright setup behind docker-compose.playwright.yaml, the external regression suite that runs on release pull requests. Which of those touch the middleware the swap replaces?
+2. What can be reused against the new loop as-is, and what needs new tests that only make sense with pi (event translation, session lifecycle, machine binding)?
+3. Propose the parity strategy: the smallest set of checks an implementation session runs before declaring a feature unchanged, so the swap is judged feature by feature rather than by reading code.
+
+The answer is facts about today's test surface plus a proposed strategy an implementation session can follow.
+
+### open #24 — Voice and pipelines inlet/outlet: covered by existing decisions, or still open
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/24) `wayfinder:research` assignees: LiveSparks
+
+## Question
+
+The day-one tier ([Which Open WebUI features must work through pi on day one](https://github.com/LiveSparks/open-webui/issues/2)) says voice (not realtime), image generation, pipelines inlet/outlet, and title/tags/follow-ups must all work through the new loop. Most got a design in later tickets: image generation is a bridged tool, code execution got its own ticket, RAG and memory stay pre-loop Python. Two must-tier features never got that treatment.
+
+1. **Voice.** Speech-to-text turns the user's audio into a message, and text-to-speech reads the reply aloud. Both look like they sit outside the agent loop, in Open WebUI's own Python. Check the 0.12.3 code and say whether that reading is right, or whether voice needs anything from the sidecar.
+2. **Pipelines inlet/outlet.** The event-bridge ticket ([Event bridge between pi's event stream and OWUI's chat pipeline](https://github.com/LiveSparks/open-webui/issues/6)) kept inlet/outlet as phase-1 musts and said the Python backend keeps owning persistence. But it did not pin down where inlet and outlet run relative to pi's stream. Check what that ticket's resolution already fixes, and what the inlet/outlet code in 0.12.3 actually does, then say what, if anything, is left to decide.
+
+The answer is a per-feature verdict: covered by existing decisions, or a decision still to make. Anything left over gets named sharply enough to become its own ticket.
 
 ### closed #23 — OWUI-computed headers on built-in pi providers: do they cross, and how
 
