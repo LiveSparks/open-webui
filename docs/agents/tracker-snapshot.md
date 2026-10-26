@@ -61,6 +61,10 @@ Standing preference — plain language, everywhere: all communication with the h
 - [Thinking effort as a dropdown beside the model picker](https://github.com/LiveSparks/open-webui/issues/20): composer dropdown hides for non-thinking models; sidecar serves per-model level lists from pi catalogs onto model metadata; existing `effort` param carries the choice per turn into between-turn session state; model switch rounds and stores via pi's rule; free-text editor replaced on all six surfaces; no took-effect pill on day one.
 - [OWUI-computed headers on built-in pi providers: do they cross, and how](https://github.com/LiveSparks/open-webui/issues/23): yes across the board, resolved server-side and handed per turn like the key — OWUI's OpenRouter attribution overrides pi's own (pi's headers nulled), per-connection template headers and the opt-in user-info forwarding headers ride one per-turn header map, and Chat Controls params cross through pi's payload-rewrite hook (works on every wire format); Azure/Anthropic protocol headers, `stream_options`, prefix stripping, Responses routing, and cookies-forwarding stay out of scope on built-ins — pi owns those, and connection shapes pi doesn't ship keep the synthesized-provider path.
 
+- [Voice and pipelines inlet/outlet: covered by existing decisions, or still open](https://github.com/LiveSparks/open-webui/issues/24): voice needs nothing new — STT/TTS are pre/post-loop HTTP endpoints, the voice-mode prompt and spoken-transcript merge ride existing pre-loop decisions (one spec sentence: the transcript merge rides the prompt-head handoff); inlet/outlet payload contract under pi-owned history broke open and became the grilling ticket [Inlet and outlet payload contract](https://github.com/LiveSparks/open-webui/issues/27).
+- [How an implementation session proves chat niceties are unchanged](https://github.com/LiveSparks/open-webui/issues/25): real coverage is the external release-gate suite (integration/chat 78 modules over HTTP, e2e/chat 128 in the browser, unit/chat AST audit); outcome-level assertions survive the swap; new tests only for event translation, session lifecycle, machine binding, approvals; parity = mapped modules run on both trees through one harness with a zero-edit rule.
+- [How the Node sidecar gets into Open WebUI's Docker image and deployment](https://github.com/LiveSparks/open-webui/issues/26): new `sidecar/` package with range-free pins, one glibc node build stage compiled to dist, a few COPY lines in the runtime stage — covers docker/compose/Helm/HF Spaces from the one image; pip installs get the sidecar via the hatch hook with a Node 22.19 gate; verify libstdc++ in slim and hatchling .bin symlinks.
+
 
 ## Not yet specified
 
@@ -89,9 +93,25 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 
 
 
+
 ## Tickets
 
-### open #26 — How the Node sidecar gets into Open WebUI's Docker image and deployment
+### open #27 — Inlet and outlet payload contract under pi-owned history
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/27) `wayfinder:grilling` assignees: none
+
+## Question
+
+Under the sidecar, Python stops assembling the chat history it sends to the model; pi owns session history. That breaks open the contract pipeline filters rely on today. An inlet filter receives the full request body, history included, and its return value is the single source of truth for the request. An outlet filter's mutated reply becomes both what the database persists and what later turns see as context. Both break open when pi owns session history. Facts in [docs/research/voice-inlet-outlet.md](https://github.com/LiveSparks/open-webui/blob/main/docs/research/voice-inlet-outlet.md).
+
+Two decisions.
+
+1. What does an inlet filter see, and what can it change, when Python hands the sidecar only the prompt head, the injections, and the new turn? Mutations to the head and the turn can flow into the handoff. Mutations to historical messages have no target without a fork.
+2. Does the outlet-mutated reply feed back into pi's session history? Today it does implicitly, because the database copy is the history source. Three options: accept the divergence and define outlet as persistence-and-presentation only, feed the mutation back through a pi session rewrite, or have pi read the final reply from Open WebUI.
+
+Decide the inlet contract first; the outlet options depend on the handoff shape that decision produces.
+
+### closed #26 — How the Node sidecar gets into Open WebUI's Docker image and deployment
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/26) `wayfinder:research` assignees: LiveSparks
 
@@ -106,7 +126,7 @@ The session-lifecycle ticket ([Session lifecycle and sidecar deployment shape](h
 
 The answer is facts about today's build plus a proposed packaging design.
 
-### open #25 — How an implementation session proves chat niceties are unchanged
+### closed #25 — How an implementation session proves chat niceties are unchanged
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/25) `wayfinder:research` assignees: LiveSparks
 
@@ -122,7 +142,7 @@ Answer three things.
 
 The answer is facts about today's test surface plus a proposed strategy an implementation session can follow.
 
-### open #24 — Voice and pipelines inlet/outlet: covered by existing decisions, or still open
+### closed #24 — Voice and pipelines inlet/outlet: covered by existing decisions, or still open
 
 [Open on GitHub](https://github.com/{owner}/{repo}/issues/24) `wayfinder:research` assignees: LiveSparks
 
