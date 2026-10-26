@@ -16,6 +16,18 @@ _Avoid_: admin panel (workspace items are user-visible, not admin-only)
 A tool-server or terminal connection a user owns and configures in their own browser settings. The browser holds its key and executes its tool calls through the chat-event relay; the backend never sees the key. Distinct from an admin machine, which is admin-configured and called server-side.
 _Avoid_: per-user tool server (same thing; "direct" is the product's name)
 
+**Prompt head**:
+The assembled system message plus the per-turn injections (RAG, memory, voice-mode prompt) that Python builds and hands to the sidecar each turn. It is the whole editable surface of a chat request; message history is not part of it.
+_Avoid_: system prompt (that is one part of it), prompt template
+
+**Inlet**:
+A filter that runs in Python before the sidecar's `prompt()` call, on the prompt head plus the new user turn. Its return value is the single source of truth for exactly that surface; it sees no history.
+_Avoid_: preprocessing (vague), request hook
+
+**Outlet**:
+A filter that runs in Python after the final reply frame and before the database persist. It mutates only the persisted copy and the chat UI's view of the reply, never the model's session history.
+_Avoid_: postprocessing (vague), response hook
+
 **Machine binding**:
 The per-turn, server-resolved link between a pi session and exactly one selected machine. The backend owns it; the model never sees or chooses it; with no machine selected the local tools are absent.
 _Avoid_: terminal binding (terminal is the legacy surface name, binding is the relationship)
