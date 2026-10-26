@@ -64,6 +64,7 @@ Standing preference — plain language, everywhere: all communication with the h
 - [Voice and pipelines inlet/outlet: covered by existing decisions, or still open](https://github.com/LiveSparks/open-webui/issues/24): voice needs nothing new — STT/TTS are pre/post-loop HTTP endpoints, the voice-mode prompt and spoken-transcript merge ride existing pre-loop decisions (one spec sentence: the transcript merge rides the prompt-head handoff); inlet/outlet payload contract under pi-owned history broke open and became the grilling ticket [Inlet and outlet payload contract](https://github.com/LiveSparks/open-webui/issues/27).
 - [How an implementation session proves chat niceties are unchanged](https://github.com/LiveSparks/open-webui/issues/25): real coverage is the external release-gate suite (integration/chat 78 modules over HTTP, e2e/chat 128 in the browser, unit/chat AST audit); outcome-level assertions survive the swap; new tests only for event translation, session lifecycle, machine binding, approvals; parity = mapped modules run on both trees through one harness with a zero-edit rule.
 - [How the Node sidecar gets into Open WebUI's Docker image and deployment](https://github.com/LiveSparks/open-webui/issues/26): new `sidecar/` package with range-free pins, one glibc node build stage compiled to dist, a few COPY lines in the runtime stage — covers docker/compose/Helm/HF Spaces from the one image; pip installs get the sidecar via the hatch hook with a Node 22.19 gate; verify libstdc++ in slim and hatchling .bin symlinks.
+- [Inlet and outlet payload contract under pi-owned history](https://github.com/LiveSparks/open-webui/issues/27): inlet runs in Python pre-`prompt()` on the prompt head + new turn, history omitted from its payload entirely (loud contract change, not silent), inlet-registered tools still merge server-side; outlet becomes persistence-and-presentation only — it mutates the DB/UI copy and never reaches pi's session history, edit-resend stays the escape hatch. Recorded in [ADR 0005](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0005-inlet-outlet-contract.md).
 
 
 ## Not yet specified
@@ -94,11 +95,12 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 
 
 
+
 ## Tickets
 
-### open #27 — Inlet and outlet payload contract under pi-owned history
+### closed #27 — Inlet and outlet payload contract under pi-owned history
 
-[Open on GitHub](https://github.com/{owner}/{repo}/issues/27) `wayfinder:grilling` assignees: none
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/27) `wayfinder:grilling` assignees: LiveSparks
 
 ## Question
 
