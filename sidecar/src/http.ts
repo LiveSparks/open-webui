@@ -89,6 +89,10 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 	});
 
 	async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+		if (!enforceVersion(req, res)) {
+			return;
+		}
+
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 		const parts = url.pathname.split("/").filter(Boolean);
 
@@ -129,7 +133,12 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 		writeJson(res, 404, { ok: false, error: `unknown route ${req.method} ${url.pathname}` });
 	}
 
-	function handleHealth(req: http.IncomingMessage, res: http.ServerResponse): void {
+	/**
+	 * The handshake bounds drift between the OWUI client and the pinned pi SDK,
+	 * so it gates every route, not just /health. Missing or empty header passes;
+	 * the OWUI client is the only caller today and lanes may probe bare.
+	 */
+	function enforceVersion(req: http.IncomingMessage, res: http.ServerResponse): boolean {
 		const clientVersion = req.headers["x-agent-client-version"];
 		if (typeof clientVersion === "string" && clientVersion !== "" && clientVersion !== config.version) {
 			writeJson(res, 409, {
@@ -138,8 +147,12 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 				version: config.version,
 				pi: config.piVersion,
 			});
-			return;
+			return false;
 		}
+		return true;
+	}
+
+	function handleHealth(_req: http.IncomingMessage, res: http.ServerResponse): void {
 		writeJson(res, 200, {
 			ok: true,
 			version: config.version,

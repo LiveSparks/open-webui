@@ -53,6 +53,41 @@ describe("HTTP surface", () => {
 		});
 	});
 
+	it("rejects POST /sessions with a mismatched client version", async () => {
+		await listenOnEphemeral(async (_server, port) => {
+			const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
+				method: "POST",
+				headers: { "x-agent-client-version": "9.9.9" },
+				body: JSON.stringify({ chatId: "chat-version" }),
+			});
+			expect(res.status).toBe(409);
+			const body = (await res.json()) as { ok: boolean; error: string };
+			expect(body.ok).toBe(false);
+			expect(body.error).toContain("version mismatch");
+			expect(bed.registry.has("chat-version")).toBe(false);
+		});
+	});
+
+	it("rejects POST /sessions/{chat}/prompt with a mismatched client version", async () => {
+		await listenOnEphemeral(async (_server, port) => {
+			const create = await fetch(`http://127.0.0.1:${port}/sessions`, {
+				method: "POST",
+				body: JSON.stringify({ chatId: "chat-version-prompt" }),
+			});
+			expect(create.status).toBe(200);
+
+			const res = await fetch(`http://127.0.0.1:${port}/sessions/chat-version-prompt/prompt`, {
+				method: "POST",
+				headers: { "x-agent-client-version": "9.9.9" },
+				body: JSON.stringify({ message: "hello" }),
+			});
+			expect(res.status).toBe(409);
+			const body = (await res.json()) as { ok: boolean; error: string };
+			expect(body.ok).toBe(false);
+			expect(body.error).toContain("version mismatch");
+		});
+	});
+
 	it("streams pi-native SSE frames and a done frame on prompt", async () => {
 		await listenOnEphemeral(async (_server, port) => {
 			const create = await fetch(`http://127.0.0.1:${port}/sessions`, {
