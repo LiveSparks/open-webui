@@ -59,6 +59,8 @@ Standing preference — plain language, everywhere: all communication with the h
 - [Sub-agent UI: live follow view, steering, and the running-sub-agents card](https://github.com/LiveSparks/open-webui/issues/19): mixed prototype verdict — live delegation card is variant A (console tail of the child's last steps, steering input + queue counter at the card's foot, queued message surfaced as a one-line inline note); running-sub-agents card is variant B (list grouped "foreground · blocks the turn" vs "background", state pills and click-through to the child chat); machine takeover in the child chat is variant C (loud amber banner, one proper decision: applies next turn, stored on the child chat record). Prototype stays on throwaway branch `prototype/subagent-ui`.
 
 - [Thinking effort as a dropdown beside the model picker](https://github.com/LiveSparks/open-webui/issues/20): composer dropdown hides for non-thinking models; sidecar serves per-model level lists from pi catalogs onto model metadata; existing `effort` param carries the choice per turn into between-turn session state; model switch rounds and stores via pi's rule; free-text editor replaced on all six surfaces; no took-effect pill on day one.
+- [OWUI-computed headers on built-in pi providers: do they cross, and how](https://github.com/LiveSparks/open-webui/issues/23): yes across the board, resolved server-side and handed per turn like the key — OWUI's OpenRouter attribution overrides pi's own (pi's headers nulled), per-connection template headers and the opt-in user-info forwarding headers ride one per-turn header map, and Chat Controls params cross through pi's payload-rewrite hook (works on every wire format); Azure/Anthropic protocol headers, `stream_options`, prefix stripping, Responses routing, and cookies-forwarding stay out of scope on built-ins — pi owns those, and connection shapes pi doesn't ship keep the synthesized-provider path.
+
 
 ## Not yet specified
 
@@ -88,5 +90,250 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 
 
 
+
 ## Tickets
+
+### closed #23 — OWUI-computed headers on built-in pi providers: do they cross, and how
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/23) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+When an OWUI connection maps to a **built-in** pi provider (OpenRouter, opencode-go, Anthropic, OpenAI, Google), pi builds its own request headers — OWUI's per-connection custom headers and extra/passthrough params don't apply. That's a recorded consequence of the model-handoff decision.
+
+What needs deciding: does anything OWUI computes per connection or per chat need to ride on those built-in-provider requests anyway — templated headers like `{{CHAT_ID}}`/`{{USER_ID}}`, per-connection custom headers, attribution headers OWUI sets today (it special-cases OpenRouter), extra/passthrough body params?
+
+- If **yes**: pick the mechanism and check it against the standing rule that the sidecar never learns raw connection settings (values must be resolved server-side and handed over per turn, like the key is).
+- If **no**: say so plainly, and custom headers/params stay a synthesized-custom-provider feature only.
+
+Note what pi already sends on its own: its built-in OpenRouter provider sets attribution headers itself, so OWUI's current OpenRouter special-casing may simply be replaced. Facts to check against pi's source before deciding, not assumed.
+
+### closed #22 — How OWUI hands a model, provider settings, and the API key to the sidecar
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/22) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+Open WebUI keeps credential authority; the pi sidecar is the loop. Between those two sits an unmade decision: how, per chat and per turn, the OWUI backend hands the sidecar the three things a request needs — the chosen model, that model's provider settings, and the API key.
+
+What needs deciding (HITL — tradeoffs between convenience and control are judgment calls):
+
+- Does the session get its model and key once at creation, or freshly resolved every turn so an admin can rotate a provider key live?
+- How does OWUI express the model to pi (pi's `model.provider/model.id` pair, a custom provider object, or a pre-registered provider), and where do OpenAI-compatible custom connections like OpenRouter live in that expression?
+- Does the key cross the boundary per request over the sidecar's signal route (how the map's signed-binding pattern applies to credentials), or does an escaped env-var style handle persist for the session's life?
+- What happens when the provider or credentials fail — who reports, and how does a mid-chat provider change ride through (same code path as the edit-resend fork)?
+
+Facts already fixed: pi's agent takes a `getApiKey` runtime option and pi-ai resolves credentials through it; `opencode-go` sends its own session header (see the closed research ticket above); OpenRouter and opencode go are the driving human's day-one providers.
+
+Feeds the implementation run directly, and neighbors the model-picker work in the ticket above.
+
+
+### closed #21 — How pi supports opencode go and what OWUI must supply for it
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/21) `wayfinder:research` assignees: LiveSparks
+
+## Question
+
+Open WebUI has no native support for the opencode go provider; the driving human uses it. pi already ships it: pi-ai has an `opencode-go` provider, and each request carries an `x-opencode-session` header — a session id alongside every message. Verify the support shape against pi-ai: which APIs it speaks, which models and thinking levels it offers, how the key authenticates, and what the session header means over a conversation. Then state what the OWUI integration needs: where the key lives (the map's rule is OWUI keeps credential authority) and whether the session id maps cleanly onto the one-chat-one-pi-session rule or needs its own id. Deliverable: the facts the provider-integration decision hangs on, not the decision itself.
+
+Feeds [Thinking effort as a dropdown beside the model picker](https://github.com/LiveSparks/open-webui/issues/20), whose provider-capability facts depend on it.
+
+
+### closed #20 — Thinking effort as a dropdown beside the model picker
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/20) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+pi speaks thinking levels natively: off, minimal, low, medium, high, xhigh, max, limited to what the chosen model supports. Open WebUI today offers effort selection as free text among a sea of parameters, which reads as unusable. Decide how the chat UI picks thinking effort as a **dropdown beside the model picker**: how the choice rides through the request and the event bridge into the pi session, what a saved chat remembers when the user changes model, and which models show the control at all (model capability, per provider). The driving human's providers are OpenRouter and opencode go, so their capability facts matter most.
+
+Part of the map (thinking-effort facts for opencode go hang on [How pi supports opencode go and what OWUI must supply for it](https://github.com/LiveSparks/open-webui/issues/21)).
+
+
+### closed #19 — Sub-agent UI: live follow view, steering, and the running-sub-agents card
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/19) `wayfinder:prototype` assignees: LiveSparks
+
+## Question
+
+Prototype the sub-agent UI surfaces so the shapes can be reacted to before building. The behaviors are decided (live follow in the delegation card and child chat; enqueue-only steering from either view; running-sub-agents card above the composer with count + per-delegation rows that navigate to the child chat). What needs a concrete artifact: how the live delegation card presents the child's activity (tail? full transcript? streaming status lines?), what the steering affordance looks like while a child runs, and the running-sub-agents card's layout and states (pending/running/steered/done, foreground vs background rows). Frontend is Svelte and the pending-approval card above the composer is the existing pattern to extend. Skew toward the cheapest artifact that lets a human steer the design.
+
+The delegation-mechanics ticket added one surface to this ticket: the machine takeover in the child's own view. The mechanics are decided there (change applies next turn, stored on the child chat's record, restored on open, fail closed if the machine is gone). What needs an artifact here: where the takeover control lives in the child view and what it looks like while a child is running, folded into the same prototype.
+
+
+### closed #18 — Delegation mechanics in the sidecar: spawning, limits, and crash behavior
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/18) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+Design the delegation mechanism the sidecar executes, given the locked shape in the sub-agent ticket: `delegate_task` bridges as a custom pi tool whose `execute` spawns a second in-process `createAgentSession` in the sidecar. Decide (and grill where choices conflict):
+
+- Child session construction: which settings per child (model resolution, settings, cwd — does a child share the parent chat's per-chat workspace directory?), and how the child's tool set is assembled (full bridge tool set minus delegation, minus memory-mutation tools).
+- Machine binding for children: re-resolution per child session and per turn via the backend loopback; what happens when the chat's machine changes mid-run of a background child (child already holds a binding — re-bind next turn absent or keep per today's per-turn rule).
+- Limits: how max_concurrent / max_async are enforced in the sidecar (semaphores), what a delegation emits at the tool level when the limit queue is full, and how max_iterations / max_output apply to a child session (pi-side caps) — mapping the OWUI knob values fetched at delegation start.
+- Event plumbing: which child session events ride the `onUpdate` partial-result channel into the event bridge, and at what rate/fidelity, so the parent card and child chat view both render live without flooding the stream.
+- Cancellation and nesting: parent `abort()` semantics vs child heartbeat — does abort propagate to running children, and what does the tool result say when a child is cancelled mid-run.
+- Failure surface: child model/API errors, child-sidecar crash, and their tool-result shapes.
+
+### closed #17 — Should the sidecar's chat loop run on pi-durable instead of the SDK session
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/17) `wayfinder:grilling` assignees: LiveSparks
+
+Part of #1
+
+## Question
+
+The embedding research (#3) chose the pi coding agent SDK in-process, where a process death mid-generation loses that turn and the session resumes on the next message. @earendil-works/pi-durable offers a stronger guarantee: every conversation entry, model turn, and tool call is committed to storage before it is shown, so a crash or restart resumes mid-turn, and each tool call runs as a durable task.
+
+Decide whether the sidecar's chat loop moves to pi-durable (revising #3), stays on the pi coding agent SDK with crash behavior as decided in #9 (error for that turn, resume next message), or adopts pi-durable for some sessions only (for example long-running agent tasks, not the chat spine).
+
+Blocked on the pi-durable compatibility research; that research decides what is possible, this decide what is chosen.
+
+### closed #16 — Can pi-durable host the sidecar's chat loop (bridge tools, MCP, steering, machine binding)
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/16) `wayfinder:research` assignees: none
+
+Part of #1
+
+## Question
+
+@earendil-works/pi-durable is Earendil's experimental durable harness: conversation, model turns, tool calls, and host state are committed to storage before anything is shown, so a process that dies mid-turn resumes where it stopped. The sidecar currently plans to embed the pi coding agent SDK in-process (`createAgentSession`) with JSONL session files, where a death mid-turn loses that turn and resumes on the next message.
+
+This ticket establishes the compatibility facts, not the decision:
+
+1. Does pi-durable support the tool surfaces the sidecar depends on: custom tools defined with TypeBox schemas (as `customTools` does now), and does the build-in caution that things running on pi-durable cannot use MCP servers or extension tools extend to consuming our OWUI-hosted loopback MCP server (`createMcpExtension({ loadConfig })` from #7)?
+2. Does it support per-session/per-conversation agent choice, steering (queued input handled after the current run), abort, forks (for edit-resend), resumption across process restarts, and compaction?
+3. Does it offer seams equivalent to the SDK's per-tool operations overrides, needed by the machine-binding decision (#8) to rebind bash/read/edit/write to the selected machine?
+4. What does its event surface look like for the event bridge (#6) — can the sidecar stream committed entries / running output as HTTP SSE the Python translator consumes?
+5. Storage story: what storage backends exist (MemoryStorage shown in quick start; is there a filesystem backend suitable for `DATA_DIR/pi-sessions`), and what state must the Python backend track?
+6. Maturity risk: version churn since it is experimental (API changes without notice), release cadence, and whether pi-ai version pinning in the sidecar lockfile holds both packages together.
+
+Findings saved as a research file under `research/` on this repo (pushed branch `research/pi-durable-compat`, no PR), with a context pointer comment on the ticket.
+
+### closed #15 — Binding per-user direct tool-server connections to pi
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/15) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+Open WebUI lets a user connect their own tool servers (per-user direct connections, resolved in the browser) alongside the admin-configured system machines. The machine-binding decision scoped phase 1 to admin-configured machines only. Should per-user direct connections ever bind pi's local tools (bash, read, edit, write), through the same rebind-and-loopback mechanism, and what auth and isolation changes does that need (per-user credentials, browser-resolved connectivity, per-user instead of per-chat scoping)? If yes, when?
+
+### closed #14 — What does self-learning mean for the OWUI agent: lessons, skills, and tools it writes for itself
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/14) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+The human wants a self-learning agent: it learns from its mistakes, improves its own skills, and creates and fixes its own tools, with no swarm of reviewers. Research in #13 mapped two sources to borrow from: harness2 (google-research), whose guards are deterministic validation instead of reviewer agents, and pi-continuous-learning, whose loop is observe, reflect out-of-band, inject lessons, feed outcomes back, graduate mature lessons. Decide for the OWUI sidecar:
+
+(a) What the agent may learn and write: lesson/instinct records (with the confidence ledger?), edits to its own Skills, new or fixed entries in its own Tools, or all three.
+(b) Where learning artifacts live: workspace DB vs sidecar files, and per what scope (per user, per model, per chat).
+(c) When reflection runs: post-turn async job in the sidecar vs scheduled analyzer.
+(d) Which guards replace the reviewer swarm: harness2-style deterministic validation (compile checks, schema checks, trigger wiring), confidence thresholds and graduation gates, or approval prompts to the user.
+(e) Whether learning persists across chats and users or stays per-session.
+
+Blocked by the workspace-authoring guards decision (what the agent may create, edit, and delete in the workspace) and informed by the harness2 / pi-continuous-learning research.
+
+### closed #13 — Can the chat agent self-learn? harness2 and pi-continuous-learning mechanisms
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/13) `wayfinder:research` assignees: LiveSparks
+
+Part of #1
+
+Research question: pi-continuous-learning (MattDevy/pi-extensions) runs on pi and turns session history into confidence-scored lessons; google-research/harness2 rewrites agent harnesses from rollout evidence with no reviewer agents. What do the two actually do, and which mechanisms could make our Open WebUI chat agent self-learning — learn from mistakes, improve its own skills, create and fix its own tools — without a swarm of reviewers?
+
+Deliverable: a research note on branch `research/self-learning`, findings gist posted here, then closed.
+
+### closed #12 — Agent-authored workspace: what the pi agent may create, edit, and delete
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/12) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+The workspace artifacts (Models, Knowledge, Prompts, Skills, Tools, Functions) are human-authored today. Which of them may the pi agent create, edit, and delete, through what bridged tools, and under what guards (capability gating per model, per-user/role permission checks, approval flow, versioning/undo)? Inherits the tool-bridge mechanism and mutator-guard pattern from the tool-bridge ticket.
+
+### closed #11 — Code interpreter at day one: pi built-in vs bridged OWUI interpreter
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/11) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+Code execution is a day-one blocker (decision in #2). Which source ships: pi's built-in execution (bash + codemode JS sandbox) emitting its output as OWUI's `code_interpreter` output items, so the native OWUI interpreter path is never needed for the sidecar; or the OWUI interpreter bridged through the loop (heavier, restricted-import legacy paths fall away only if unused)?
+
+Decision rule set in #2: pi built-in if it renders acceptably in OWUI's chat (code block + streamed run output, errors visible, images shown); OWUI's interpreter otherwise. The rendering half of the question belongs to the event bridge (#6), the tool half to #7 — decide here once their answers exist.
+
+### closed #10 — Mapping OWUI's native sub-agents onto pi's loop
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/10) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+OWUI v0.12.3 ships native sub-agents (built-in tool `delegate_task` → `utils/subagents.py:delegate`: fresh chat-completion run inheriting model/tools/skills/filters/terminal_id/tool_servers/features/files, background or foreground, concurrency + output limits, no recursive delegation, memory-mutation guard). Once pi is the only loop, what does a sub-agent *become*?
+
+Decide: (a) sub-agent = **child pi session** spawned by the sidecar, metadata (esp. `terminal_id` → selected-machine isolation) inherited, OWUI keeps `delegate_task` as the tool contract and its admin knobs re-expressed as sidecar config; vs (b) OWUI's `delegate` still orchestrates but its model calls route back through the bridge; vs (c) defer sub-agents out of phase 1. Also: how do background results return (`process_pending_internal_messages`), and does chat UI sub-agent progress surface through the event bridge?
+
+### closed #9 — Session lifecycle and sidecar deployment shape
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/9) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+Pin the lifecycle: OWUI chat ↔ pi session 1:1 mapping (create/resume/fork), where sessions persist (sidecar storage layout), user identity & permission propagation into tools, concurrency (async tasks), sidecar spawn/health/restart owned by the Python backend, config & version pinning. Blocked by pi-embedding research.
+
+### closed #8 — Binding pi's local tools to the selected machine with strict isolation
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/8) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+How do pi's local tools (bash, read, edit, write) get bound to the selected tool-server machine, with strict isolation: what executor calls go where, behavior when no machine is selected, guarantees against accidental cross-machine action, and which paths stay local (sidecar data dir vs machine files). Blocked by the tool-server research.
+
+### closed #7 — Tool bridge: how OWUI capabilities become pi tools
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/7) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+Design how OWUI capabilities become pi tools: mechanism (MCP server inside OWUI vs HTTP tool bridge vs both), which ship in phase 1 (memory, knowledge/RAG, uploads, code interpreter, image), exposure strategy (declared vs deferred vs code-mode orchestration), guards on mutating tools (memory), per-user auth scoping. Blocked by pi-embedding and tool-server research.
+
+### closed #6 — Event bridge between pi's event stream and OWUI's chat pipeline
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/6) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+Design the event-bridge contract: pi's session events → OWUI's chat-event inventory. Decisions: transport (translate in FastAPI vs proxy to sidecar), backpressure/cancellation mapping (interrupt), which niceties are phase-1 must-works (interrupt, edit-resend, citations, tool-call cards, structured output), error/failure rendering. Blocked by the two event inventories.
+
+### closed #5 — How do OWUI tool servers expose a selected machine to the agent
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/5) `wayfinder:research` assignees: none
+
+## Question
+
+How does the terminal machinery expose a user-selected machine: backend/open_webui/utils/terminals.py, routers/terminals.py, routers/apps.py, ENABLE_TOOL_SERVERS, TERMINAL_CONTEXT_HEADER, terminal_context_*. What APIs can a machine offer (command exec, file read/write, uploads) and how is the selected machine's context attached to a chat request? Deliverable: the mechanics an executor (pi's bash/read/edit) must call to run on that machine — and nothing else.
+
+### closed #4 — What chat events does Open WebUI's frontend consume during a response
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/4) `wayfinder:research` assignees: none
+
+## Question
+
+Enumerate the exact chat/event messages OWUI's frontend consumes between request start and end (backend/open_webui/events.py, backend/open_webui/socket/, backend/open_webui/utils/middleware.py `process_chat_response`, and the Svelte consumers under src/lib): streaming content chunks, tool-call cards, status/notifications, citations, structured output, interrupt/cancel, edit-resend, file attachments. Deliverable: the event inventory a replacement loop must emit for chat niceties to keep working.
+
+### closed #3 — How do you embed pi's agent loop in a host application
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/3) `wayfinder:research` assignees: none
+
+## Question
+
+What public surface does pi offer for embedding its agent loop in a host service: package/SDK APIs (`pi-agent-core`, `pi-ai`, `pi-coding-agent` docs at /usr/local/lib/node_modules/@earendil-works/pi-coding-agent/docs), session creation & persistence, event-stream shape, tool registration, provider/model config, env vars, running headless. Primary sources: the installed pi package docs and its source.
+
+### closed #2 — Which Open WebUI features must work through pi on day one
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/2) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+For phase 1 (the engine swap going live), which OWUI capabilities must work end-to-end through pi before the old Python loop is demoted — from: plain chat streaming; tools/functions & filters; pipelines; knowledge/RAG retrieval; code interpreter; image generation; voice; file uploads; structured output; automations; channels; MCP tool servers; admin/observability. Decide: must-work-now vs can-fall-back vs out of scope. The answer is a list with rationale, not code.
 
