@@ -55,6 +55,17 @@ RUN chown -R $UID:$GID /app/backend && \
     chgrp -R 0 /app/backend/open_webui/static && \
     chmod -R g=u /app/backend/open_webui/static
 
+######## Agent sidecar ########
+# glibc Node base so the bundled node binary executes in the Debian runtime
+# stage below (the alpine frontend stage is musl and cannot supply it).
+FROM node:22-bookworm-slim AS sidecar
+
+WORKDIR /sidecar
+COPY sidecar/package.json sidecar/package-lock.json sidecar/build.sh ./
+COPY sidecar/tsconfig.json sidecar/tsconfig.build.json ./
+COPY sidecar/src ./src
+RUN ./build.sh
+
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base
 
@@ -144,7 +155,7 @@ RUN if [ "$USE_SLIM" = "true" ] && { [ "$USE_CUDA" = "true" ] || [ "$USE_OLLAMA"
 # Git-based tool requirements require the standard image.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    curl jq ca-certificates \
+    curl jq ca-certificates libstdc++6 \
     && if [ "$USE_SLIM" != "true" ]; then \
     apt-get install -y --no-install-recommends \
     git build-essential pandoc gcc libmariadb-dev ffmpeg libsm6 libxext6; \
@@ -209,6 +220,13 @@ COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 
 # copy backend files with the ownership and static permissions prepared above
 COPY --from=build /app/backend .
+
+# copy the agent sidecar: the glibc node binary, the compiled dist, the
+# manifest for the version handshake, and the exact-pinned runtime tree
+COPY --chown=$UID:$GID --from=sidecar /usr/local/bin/node /usr/local/bin/node
+COPY --chown=$UID:$GID --from=sidecar /sidecar/dist /app/sidecar/dist
+COPY --chown=$UID:$GID --from=sidecar /sidecar/package.json /app/sidecar/package.json
+COPY --chown=$UID:$GID --from=sidecar /sidecar/node_modules /app/sidecar/node_modules
 
 EXPOSE 8080
 
