@@ -75,9 +75,15 @@ def serve(
             os.environ['USE_CUDA_DOCKER'] = 'false'
             os.environ['LD_LIBRARY_PATH'] = ':'.join(LD_LIBRARY_PATH)
 
-    import open_webui.main  # noqa: F401
     from open_webui.env import UVICORN_WORKERS, UVICORN_WS_PER_MESSAGE_DEFLATE
+    from open_webui.utils.sidecar_launch import launch
 
+    launch()
+
+    import open_webui.main  # noqa: F401
+
+    # The sidecar module registers its own exit handler, so uvicorn stays the
+    # only process in this tree and SIGTERM handling stays upstream's.
     # On Windows, uvicorn's default loop factory hardcodes ProactorEventLoop,
     # which is incompatible with psycopg v3 async.  Setting loop='none' lets
     # asyncio.run() respect the WindowsSelectorEventLoopPolicy set in db.py.
