@@ -67,6 +67,8 @@ Standing preference — plain language, everywhere: all communication with the h
 - [Inlet and outlet payload contract under pi-owned history](https://github.com/LiveSparks/open-webui/issues/27): inlet runs in Python pre-`prompt()` on the prompt head + new turn, history omitted from its payload entirely (loud contract change, not silent), inlet-registered tools still merge server-side; outlet becomes persistence-and-presentation only — it mutates the DB/UI copy and never reaches pi's session history, edit-resend stays the escape hatch. Recorded in [ADR 0005](https://github.com/LiveSparks/open-webui/blob/main/docs/adr/0005-inlet-outlet-contract.md).
 
 
+- [Idle sessions stay loaded in the sidecar: eviction policy for one shared process hosting many chats](https://github.com/LiveSparks/open-webui/issues/29): an idle chat's in-memory copy is just a cache; drop it after 15 minutes idle (50 loaded at most), reload from disk on the next message, and nothing is lost because the disk copy is the source of truth.
+
 ## Not yet specified
 
 <!-- in-scope fog, graduation slot -->
@@ -96,7 +98,28 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 
 
 
+
 ## Tickets
+
+### closed #29 — Idle sessions stay loaded in the sidecar: eviction policy for one shared process hosting many chats
+
+[Open on GitHub](https://github.com/{owner}/{repo}/issues/29) `wayfinder:grilling` assignees: LiveSparks
+
+## Question
+
+The sidecar hosts every chat as an in-process pi session in one shared backend-owned process (the lifecycle decision, Session lifecycle and sidecar deployment shape). PR1's `SessionRegistry` holds a `Map<chatId, AgentSession>` that only grows: no entry is ever unloaded while the process lives. A user with 100 old chats who opens each once leaves 100 loaded sessions resident, idle, holding their full message history in RAM. Per-session magnitude is unmeasured. The sub-agent decision makes it worse: each delegation is a second in-process session, and background children outlive the turn that spawned them.
+
+The resume path is already proven cheap (the resume-from-disk lane, and `latestSessionFile` + `createAgentSession` in `session.ts`): JSONL under `AGENT_SESSIONS/<chat_id>/` is the source of truth, so dropping a session loses nothing and the next message pays one rebuild.
+
+Pin the eviction policy:
+
+1. Eviction trigger. Idle TTL after a run ends, LRU cap on loaded sessions, or both. What are the numbers?
+2. What never evicts. A session with a running or queued turn (running children included), presumably.
+3. What eviction means. Delete from the registry and let the next `get()` rebuild from JSONL. Anything the AgentSession holds that is NOT in JSONL and would be lost (between-turn state from the effort decision, pending background-child results)?
+4. Owner. This lands as an amendment in the event-bridge PR (PR3 of the implementation plan), which owns `sidecar/src/session.ts` lifecycle next; the sub-agent PR (PR9) inherits the policy for child sessions.
+5. Health. `GET /health` reports session counts today; should it report loaded vs running vs evicted, and should eviction be observable?
+
+Recorded as standing context: the operator flagged this from the box's own RAM behavior, stray sessions held ~2 GB on the 8 GB dev host.
 
 ### closed #27 — Inlet and outlet payload contract under pi-owned history
 
