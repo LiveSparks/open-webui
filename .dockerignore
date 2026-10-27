@@ -21,3 +21,4 @@ backend/data/*
 
 .venv
 .git
+sidecar/node_modules

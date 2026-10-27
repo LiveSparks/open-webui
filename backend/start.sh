@@ -16,6 +16,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 cd "$SCRIPT_DIR" || exit 1
 
+PYTHON_CMD=$(command -v python3 || command -v python)
+
 # ── Playwright browser installation (if configured) ──────────────────────────
 
 if [[ "${USE_SLIM_DOCKER,,}" != "true" && "${WEB_LOADER_ENGINE,,}" == "playwright" ]]; then
@@ -63,6 +65,16 @@ if [[ "${USE_CUDA_DOCKER,,}" == "true" ]]; then
   export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/lib/python3.11/site-packages/torch/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib"
 fi
 
+# ── Agent sidecar ────────────────────────────────────────────────────────────
+
+# The sidecar is opt-in per deployment: AGENT_SIDECAR_PORT set means this
+# deployment wants the agent engine. The launch contract lives in
+# open_webui.utils.sidecar_launch so the image and the packaged wheel share
+# one implementation; it retries with backoff and always lets uvicorn serve.
+if [[ -n "${AGENT_SIDECAR_PORT:-}" ]]; then
+  "$PYTHON_CMD" -c 'import open_webui.utils.sidecar_launch as s; s.launch(exit_hook=False)' || true
+fi
+
 # ── HuggingFace Space deployment ─────────────────────────────────────────────
 
 if [[ -n "${SPACE_ID:-}" ]]; then
@@ -95,7 +107,6 @@ fi
 
 # ── Launch uvicorn ───────────────────────────────────────────────────────────
 
-PYTHON_CMD=$(command -v python3 || command -v python)
 UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 
 if [[ "$#" -gt 0 ]]; then
@@ -104,9 +115,9 @@ else
   ARGS=(--workers "$UVICORN_WORKERS" --ws-per-message-deflate "${UVICORN_WS_PER_MESSAGE_DEFLATE:-true}")
 fi
 
+UVICORN_ARGS=(--host "$HOST" --port "$PORT" --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" "${ARGS[@]}")
+
+# The sidecar module registers its own exit handler, so exec keeps this
+# process tree to uvicorn alone and SIGTERM handling stays upstream's.
 exec env WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-}" \
-  "$PYTHON_CMD" -m uvicorn open_webui.main:app \
-    --host "$HOST" \
-    --port "$PORT" \
-    --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-*}" \
-    "${ARGS[@]}"
+  "$PYTHON_CMD" -m uvicorn open_webui.main:app "${UVICORN_ARGS[@]}"

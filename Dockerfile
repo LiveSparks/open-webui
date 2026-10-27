@@ -33,7 +33,8 @@ ARG UID
 ARG GID
 
 # Set Node.js options (heap limit Allocation failed - JavaScript heap out of memory)
-# ENV NODE_OPTIONS="--max-old-space-size=4096"
+# Cap the frontend build heap so it fits inside memory-capped docker builds.
+ENV NODE_OPTIONS="--max-old-space-size=5120"
 
 WORKDIR /app
 
@@ -54,6 +55,17 @@ RUN npm run build && \
 RUN chown -R $UID:$GID /app/backend && \
     chgrp -R 0 /app/backend/open_webui/static && \
     chmod -R g=u /app/backend/open_webui/static
+
+######## Agent sidecar ########
+# glibc Node base so the bundled node binary executes in the Debian runtime
+# stage below (the alpine frontend stage is musl and cannot supply it).
+FROM node:22-bookworm-slim AS sidecar
+
+WORKDIR /sidecar
+COPY sidecar/package.json sidecar/package-lock.json sidecar/build.sh ./
+COPY sidecar/tsconfig.json sidecar/tsconfig.build.json ./
+COPY sidecar/src ./src
+RUN ./build.sh
 
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base
@@ -97,10 +109,6 @@ ENV OPENAI_API_KEY="" \
     ANONYMIZED_TELEMETRY=false
 
 #### Other models #########################################################
-## whisper TTS model settings ##
-ENV WHISPER_MODEL="base" \
-    WHISPER_MODEL_DIR="/app/backend/data/cache/whisper/models"
-
 ## RAG Embedding model settings ##
 ENV RAG_EMBEDDING_MODEL="$USE_EMBEDDING_MODEL_DOCKER" \
     RAG_RERANKING_MODEL="$USE_RERANKING_MODEL_DOCKER" \
@@ -144,12 +152,10 @@ RUN if [ "$USE_SLIM" = "true" ] && { [ "$USE_CUDA" = "true" ] || [ "$USE_OLLAMA"
 # Git-based tool requirements require the standard image.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    curl jq ca-certificates \
+    curl jq ca-certificates libstdc++6 \
     && if [ "$USE_SLIM" != "true" ]; then \
     apt-get install -y --no-install-recommends \
     git build-essential pandoc gcc libmariadb-dev ffmpeg libsm6 libxext6; \
-    fi && if [ "$USE_OLLAMA" = "true" ]; then \
-    apt-get install -y --no-install-recommends zstd; \
     fi && rm -rf /var/lib/apt/lists/*
 
 # install python dependencies
@@ -158,29 +164,17 @@ COPY --chown=$UID:$GID ./backend/requirements*.txt ./
 # Set UV_LINK_MODE to copy to prevent 0-byte file corruption in QEMU arm64 cross-builds
 ENV UV_LINK_MODE=copy
 
+# This image carries no local-model machinery and never pre-warms model
+# weights: no torch, no Ollama, no whisper or sentence-transformers downloads.
+# RAG embeddings and providers are external-only on this deployment.
 RUN --mount=from=ghcr.io/astral-sh/uv:0.12.10,source=/uv,target=/bin/uv \
     set -e; \
     if [ "$USE_SLIM" = "true" ]; then \
     uv pip install --system -r requirements-slim.txt --no-cache-dir; \
-    elif [ "$USE_CUDA" = "true" ]; then \
-    # If you use CUDA the whisper and embedding model will be downloaded on first use
-    # fix: pin torch<=2.9.1 - torch 2.10.0 aarch64 wheels cause SIGILL on ARM devices (RPi 4 Cortex-A72) #21349
-    pip3 install 'torch<=2.9.1' torchvision torchaudio --index-url https://download.pytorch.org/whl/$USE_CUDA_DOCKER_VER --no-cache-dir; \
-    uv pip install --system -r requirements.txt --no-cache-dir; \
-    python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['RAG_EMBEDDING_MODEL'], device='cpu')"; \
-    python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ.get('AUXILIARY_EMBEDDING_MODEL', 'TaylorAI/bge-micro-v2'), device='cpu')"; \
-    python -c "import os; from faster_whisper import WhisperModel; WhisperModel(os.environ['WHISPER_MODEL'], device='cpu', compute_type='int8', download_root=os.environ['WHISPER_MODEL_DIR'])"; \
-    python -c "import os; import tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING_NAME'])"; \
     else \
-    pip3 install 'torch<=2.9.1' torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-cache-dir; \
     uv pip install --system -r requirements.txt --no-cache-dir; \
-    if [ "$USE_SLIM" != "true" ]; then \
-    python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ['RAG_EMBEDDING_MODEL'], device='cpu')"; \
-    python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ.get('AUXILIARY_EMBEDDING_MODEL', 'TaylorAI/bge-micro-v2'), device='cpu')"; \
-    python -c "import os; from faster_whisper import WhisperModel; WhisperModel(os.environ['WHISPER_MODEL'], device='cpu', compute_type='int8', download_root=os.environ['WHISPER_MODEL_DIR'])"; \
+    fi; \
     python -c "import os; import tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING_NAME'])"; \
-    fi; \
-    fi; \
     mkdir -p /app/backend/data; chown -R $UID:$GID /app/backend/data/; \
     if [ -d /app/backend/data/cache ]; then chmod -R a+rX /app/backend/data/cache; fi; \
     rm -rf /var/lib/apt/lists/*;
@@ -189,14 +183,6 @@ RUN --mount=from=ghcr.io/astral-sh/uv:0.12.10,source=/uv,target=/bin/uv \
 # Keep this out of the default image to avoid the extra image bloat; deployments
 # with read-only site-packages can uncomment it and bake the model in.
 # RUN python -m spacy download en_core_web_sm
-
-# Install Ollama if requested
-RUN if [ "$USE_OLLAMA" = "true" ]; then \
-    date +%s > /tmp/ollama_build_hash && \
-    echo "Cache broken at timestamp: `cat /tmp/ollama_build_hash`" && \
-    curl -fsSL https://ollama.com/install.sh | sh && \
-    rm -rf /var/lib/apt/lists/*; \
-    fi
 
 # copy embedding weight from build
 # RUN mkdir -p /root/.cache/chroma/onnx_models/all-MiniLM-L6-v2
@@ -209,6 +195,13 @@ COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 
 # copy backend files with the ownership and static permissions prepared above
 COPY --from=build /app/backend .
+
+# copy the agent sidecar: the glibc node binary, the compiled dist, the
+# manifest for the version handshake, and the exact-pinned runtime tree
+COPY --chown=$UID:$GID --from=sidecar /usr/local/bin/node /usr/local/bin/node
+COPY --chown=$UID:$GID --from=sidecar /sidecar/dist /app/sidecar/dist
+COPY --chown=$UID:$GID --from=sidecar /sidecar/package.json /app/sidecar/package.json
+COPY --chown=$UID:$GID --from=sidecar /sidecar/node_modules /app/sidecar/node_modules
 
 EXPOSE 8080
 

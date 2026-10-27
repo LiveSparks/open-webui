@@ -69,8 +69,8 @@ dependencies = [
     "boto3==1.42.62",
     
     "transformers==5.5.4",
-    "sentence-transformers==5.5.1",
-    "accelerate==1.13.0",
+    # sentence-transformers and accelerate removed: both hard-require torch and
+    # dragged the full CUDA wheel set into the image. External-only deployment.
     "pyarrow==20.0.0", # fix: pin pyarrow version to 20 for rpi compatibility #15897
     "einops==0.8.2",
 
@@ -100,8 +100,8 @@ dependencies = [
     "rapidocr==3.10.0",
     "rank-bm25==0.2.2",
 
-    "onnxruntime==1.26.0",
-    "faster-whisper==1.2.1",
+    # onnxruntime and faster-whisper removed: exist only for the local MiniLM
+    # ONNX embedding and the whisper model. External-only deployment.
 
     "black==26.5.1",
     "youtube-transcript-api==1.2.4",
