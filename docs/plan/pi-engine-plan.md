@@ -199,6 +199,7 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 - [ ] Approvals and `request:user_input` ride the translator's interaction callbacks; title, tags, and follow-ups keep their `background_tasks_handler` plumbing.
 - [ ] The prompt head from `process_chat_payload` hands off wholesale to the sidecar per the [chat events inventory](https://github.com/LiveSparks/open-webui/issues/4).
 - [ ] Fork `open-webui/tests` into `LiveSparks/open-webui-tests` and add the event-translation module on the harness; mapped chat modules run script-first on trunk and head through one harness with a zero-edit rule per the [parity decision](https://github.com/LiveSparks/open-webui/issues/25).
+- [ ] Session eviction per the [eviction decision](https://github.com/LiveSparks/open-webui/issues/29). The in-memory session registry is a cache over the JSONL, never the source of truth. Evict a session 15 minutes after its last turn ends, with a hard cap of 50 loaded sessions evicted LRU-first. Never evict a session with a running or queued turn, and never a parent while it has background children alive. Eviction deletes the registry entry; the next message rebuilds from JSONL and must land with any between-turn state restored from the chat record, not lost.
 
 **You see.**
 
@@ -208,6 +209,7 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
 - [ ] New parity module `integration/chat/agent_event_bridge.py` asserts the envelope output items, the stop path, steering, edit-resend fork, and error frames against the scripted provider. Run `OPEN_WEBUI_SOURCE_DIR=$PWD/backend DATA_DIR=/tmp/scratch/data STATIC_DIR=/tmp/scratch/static WEBUI_SECRET_KEY=test python -m pytest integration/chat/agent_event_bridge.py -q`.
+- [ ] Registry eviction spec: idle-TTL eviction, the 50-cap LRU order, the running-and-children guards, and rebuild-from-JSONL preserving prior context and between-turn state.
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten lanes on `grok-4.7-xhigh-fast` at the PR head, per the boot recipe.
 
@@ -221,6 +223,7 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 - [ ] Lane 8. Title and follow-ups. After a turn the title, tags, and follow-up pills arrive through the unchanged background path. Save `title-followups.png`. Pass when all three appear.
 - [ ] Lane 9. Inlet and outlet. An inlet filter rewrites the prompt head and an outlet filter rewrites the persisted reply. Save `filters.png`. Pass when the sidecar turn sees the rewritten head and history stays untouched.
 - [ ] Lane 10. Stop mid-tool. Hard stop during a pending tool turn. Save `stop-mid-tool.png`. Pass when the task registry clears and the next message is clean.
+- [ ] Lane 11. Eviction. Open 60 chats, let the TTL lapse on 30, prompt an evicted one again, and watch a second while it runs. Save `eviction.png`. Pass when the cap holds, the evicted chat rebuilds from disk with its history intact, nothing running or parented is evicted, and the measured RAM per idle session is recorded. `GET /health` reports loaded, running, and evicted-since-boot counts.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
@@ -521,6 +524,7 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 - [ ] The sidecar spawns each delegation as a second in-process pi session with the parent's model, system messages, and the admin sub-agent prompt. Recursion stays banned, memory mutation tools are stripped, and the tool set is the full bridge minus delegation and memory mutation.
 - [ ] Children pin their first machine and can rebind only from their own view, with the change stored on the child chat record and fail-closed when gone. Foreground waits while background errors instantly name the knob. The parent's `max_iterations` is a finishTurn hook with the default raised to 256.
 - [ ] Child events stream unthrottled at the source. Background results return through the unchanged `process_pending_internal_messages` flow.
+- [ ] Child sessions inherit the [eviction policy](https://github.com/LiveSparks/open-webui/issues/29) from PR3: a parent is never evicted while it has background children alive, and a child is never evicted while running or queued, so a background result is never orphaned by an eviction.
 
 **You see.**
 
