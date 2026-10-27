@@ -139,6 +139,8 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 - [ ] Dockerfile gains a `node:22-bookworm-slim` stage building `sidecar/` per the [packaging decision](https://github.com/LiveSparks/open-webui/issues/26), then COPY lines put `sidecar/dist` into the runtime stage; verify `libstdc++` in the slim base.
 - [ ] `backend/start.sh` launches the sidecar next to uvicorn, gated on the `AGENT_SIDECAR_*` variables, and waits for the health endpoint before uvicorn serves.
 - [ ] `backend/hatch_build.py` builds the sidecar during a pip install behind the Node gate per the [sidecar packaging research](docs/research/sidecar-packaging.md), with hatch `.bin` symlinks verified in a fresh venv.
+- [ ] Operator directive (standing order 15): this deployment runs NO local models, ever. The image never builds or installs torch, torchvision, torchaudio, ollama, whisper, or sentence-transformers, and never pre-warms local model weights. Strip the unconditional `pip3 install torch torchvision torchaudio` (Dockerfile:178-181), the sentence-transformers prewarm that follows it, the `USE_OLLAMA` download logic, and the whisper model env.
+- [ ] Backend follow-up, not this PR: Open WebUI's default RAG embedding model is local sentence-transformers, which needs the machinery we just stripped. The backend PR that owns pre-loop RAG wiring (PR4, with PR8 taking the surface) must move that default to an external embedding provider, or RAG breaks at runtime.
 
 **You see.**
 
@@ -152,7 +154,7 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten lanes on `grok-4.7-xhigh-fast` at the PR head, per the boot recipe.
 
 - [ ] Lane 1. Regression lane against trunk. Build trunk and head images and boot both. Trunk has no sidecar, record that, and gate that the head image runs the sidecar next to uvicorn. Save `image-boots.png`. Pass when the head container answers health and serves the web UI.
-- [ ] Lane 2. Compose. `docker compose up` boots chat with ollama. Save `compose-up.png`. Pass when health is live inside the compose network.
+- [ ] Lane 2. Compose. `docker compose up` boots the chat stack with no local-model service (no ollama, no torch build). Save `compose-up.png`. Pass when health is live inside the compose network.
 - [ ] Lane 3. glibc. Check `ldd` of the bundled Node and the sidecar launch log in the runtime container. Save `libstdcpp.png`. Pass when Node reports a runtime error from the dynamic linker rather than failing at startup.
 - [ ] Lane 4. HF Spaces shape. Build with `SPACE_ID` set and bootstrap scripts untouched. Save `hf-build.png`. Pass when the image builds and start.sh reaches the sidecar wait.
 - [ ] Lane 5. Pip install. `python -m build`, install the wheel in a fresh venv, run the package. Save `wheel-sidecar.png`. Pass when the Node gate passes and the bundled sidecar starts.
