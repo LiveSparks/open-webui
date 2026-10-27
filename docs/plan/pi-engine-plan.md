@@ -131,54 +131,54 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 
 **Files.**
 
-- [ ] Edit `Dockerfile` and `backend/start.sh` and `backend/hatch_build.py`.
-- [ ] Create `sidecar/build.sh` compiling the bundled Node build to `sidecar/dist`.
+- [x] Edit `Dockerfile` and `backend/start.sh` and `backend/hatch_build.py`.
+- [x] Create `sidecar/build.sh` compiling the bundled Node build to `sidecar/dist`.
 
 **Build.**
 
-- [ ] Dockerfile gains a `node:22-bookworm-slim` stage building `sidecar/` per the [packaging decision](https://github.com/LiveSparks/open-webui/issues/26), then COPY lines put `sidecar/dist` into the runtime stage; verify `libstdc++` in the slim base.
-- [ ] `backend/start.sh` launches the sidecar next to uvicorn, gated on the `AGENT_SIDECAR_*` variables, and waits for the health endpoint before uvicorn serves.
-- [ ] `backend/hatch_build.py` builds the sidecar during a pip install behind the Node gate per the [sidecar packaging research](docs/research/sidecar-packaging.md), with hatch `.bin` symlinks verified in a fresh venv.
-- [ ] Operator directive (standing order 15): this deployment runs NO local models, ever. The image never builds or installs torch, torchvision, torchaudio, ollama, whisper, or sentence-transformers, and never pre-warms local model weights. Strip the unconditional `pip3 install torch torchvision torchaudio` (Dockerfile:178-181), the sentence-transformers prewarm that follows it, the `USE_OLLAMA` download logic, and the whisper model env.
-- [ ] Backend follow-up, not this PR: Open WebUI's default RAG embedding model is local sentence-transformers, which needs the machinery we just stripped. The backend PR that owns pre-loop RAG wiring (PR4, with PR8 taking the surface) must move that default to an external embedding provider, or RAG breaks at runtime.
+- [x] Dockerfile gains a `node:22-bookworm-slim` stage building `sidecar/` per the [packaging decision](https://github.com/LiveSparks/open-webui/issues/26), then COPY lines put `sidecar/dist` into the runtime stage; verify `libstdc++` in the slim base.
+- [x] `backend/start.sh` launches the sidecar next to uvicorn, gated on the `AGENT_SIDECAR_*` variables, and waits for the health endpoint before uvicorn serves.
+- [x] `backend/hatch_build.py` builds the sidecar during a pip install behind the Node gate per the [sidecar packaging research](docs/research/sidecar-packaging.md), with hatch `.bin` symlinks verified in a fresh venv.
+- [x] Operator directive (standing order 15): this deployment runs NO local models, ever. The image never builds or installs torch, torchvision, torchaudio, ollama, whisper, or sentence-transformers, and never pre-warms local model weights. Strip the unconditional `pip3 install torch torchvision torchaudio` (Dockerfile:178-181), the sentence-transformers prewarm that follows it, the `USE_OLLAMA` download logic, and the whisper model env.
+- [x] Backend follow-up, not this PR: Open WebUI's default RAG embedding model is local sentence-transformers, which needs the machinery we just stripped. The backend PR that owns pre-loop RAG wiring (PR4, with PR8 taking the surface) must move that default to an external embedding provider, or RAG breaks at runtime.
 
 **You see.**
 
-- [ ] A built container answers `GET /health` on the sidecar endpoint.
-- [ ] `docker compose up` brings the chat stack with no extra service.
+- [x] A built container answers `GET /health` on the sidecar endpoint.
+- [x] `docker compose up` brings the chat stack with no extra service.
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] `sidecar/build.sh --check` runs the stage locally and asserts dist exists with the exact pins recorded. Run it in the PR.
+- [x] `sidecar/build.sh --check` runs the stage locally and asserts dist exists with the exact pins recorded. Run it in the PR.
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten lanes on `grok-4.7-xhigh-fast` at the PR head, per the boot recipe.
 
-- [ ] Lane 1. Regression lane against trunk. Build trunk and head images and boot both. Trunk has no sidecar, record that, and gate that the head image runs the sidecar next to uvicorn. Save `image-boots.png`. Pass when the head container answers health and serves the web UI.
-- [ ] Lane 2. Compose. `docker compose up` boots the chat stack with no local-model service (no ollama, no torch build). Save `compose-up.png`. Pass when health is live inside the compose network.
-- [ ] Lane 3. glibc. Check `ldd` of the bundled Node and the sidecar launch log in the runtime container. Save `libstdcpp.png`. Pass when Node reports a runtime error from the dynamic linker rather than failing at startup.
-- [ ] Lane 4. HF Spaces shape. Build with `SPACE_ID` set and bootstrap scripts untouched. Save `hf-build.png`. Pass when the image builds and start.sh reaches the sidecar wait.
-- [ ] Lane 5. Pip install. `python -m build`, install the wheel in a fresh venv, run the package. Save `wheel-sidecar.png`. Pass when the Node gate passes and the bundled sidecar starts.
-- [ ] Lane 6. Slim base. Repeat the boot on the slim Python base only. Save `slim-boot.png`. Pass when the same result as lane 2 holds.
-- [ ] Lane 7. Startup order. Start the container and watch the log order. Save `start-order.png`. Pass when uvicorn serves only after health answers.
-- [ ] Lane 8. Env config. Change the sidecar port through `AGENT_SIDECAR_*` and restart. Save `env-config.png`. Pass when the new port serves.
-- [ ] Lane 9. Crash loop. Point the sidecar at a broken config, restart the container. Save `crash-loop.png`. Pass when start.sh retries instead of losing uvicorn.
-- [ ] Lane 10. Arm64. Build and boot the arm64 variant the way CI's `docker.yaml` does. Save `arm64-boot.png`. Pass when health answers on arm64.
+- [x] Lane 1. Regression lane against trunk. Build trunk and head images and boot both. Trunk has no sidecar, record that, and gate that the head image runs the sidecar next to uvicorn. Save `image-boots.png`. Pass when the head container answers health and serves the web UI.
+- [x] Lane 2. Compose. `docker compose up` boots the chat stack with no local-model service (no ollama, no torch build). Save `compose-up.png`. Pass when health is live inside the compose network.
+- [x] Lane 3. glibc. Check `ldd` of the bundled Node and the sidecar launch log in the runtime container. Save `libstdcpp.png`. Pass when Node reports a runtime error from the dynamic linker rather than failing at startup.
+- [x] Lane 4. HF Spaces shape. Build with `SPACE_ID` set and bootstrap scripts untouched. Save `hf-build.png`. Pass when the image builds and start.sh reaches the sidecar wait.
+- [x] Lane 5. Pip install. `python -m build`, install the wheel in a fresh venv, run the package. Save `wheel-sidecar.png`. Pass when the Node gate passes and the bundled sidecar starts.
+- [x] Lane 6. Slim base. Repeat the boot on the slim Python base only. Save `slim-boot.png`. Pass when the same result as lane 2 holds.
+- [x] Lane 7. Startup order. Start the container and watch the log order. Save `start-order.png`. Pass when uvicorn serves only after health answers.
+- [x] Lane 8. Env config. Change the sidecar port through `AGENT_SIDECAR_*` and restart. Save `env-config.png`. Pass when the new port serves.
+- [x] Lane 9. Crash loop. Point the sidecar at a broken config, restart the container. Save `crash-loop.png`. Pass when start.sh retries instead of losing uvicorn.
+- [x] Lane 10. Arm64. Build and boot the arm64 variant the way CI's `docker.yaml` does. Save `arm64-boot.png`. Pass when health answers on arm64.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Metric. Compressed image size and wheel size in MB, at trunk and at head.
-- [ ] Probe. `docker save | gzip` size and `python -m build` artifact size, both interleaved on the same builder host.
-- [ ] Baseline. Record trunk image and wheel sizes first.
-- [ ] Rule. Fails when head adds more than 250 MB to the image or more than 60 MB to the wheel without the operator's sign-off.
+- [x] Metric. Compressed image size and wheel size in MB, at trunk and at head.
+- [x] Probe. `docker save | gzip` size and `python -m build` artifact size, both interleaved on the same builder host.
+- [x] Baseline. Record trunk image and wheel sizes first.
+- [x] Rule. Fails when head adds more than 250 MB to the image or more than 60 MB to the wheel without the operator's sign-off.
 
 **Review gate.** None. PR2 is not review-gated.
 
 **Merge.**
 
-- [ ] Root's clean verdict at the exact head SHA.
-- [ ] Bugbot triage done.
-- [ ] Rebased onto current trunk after the verdict, patch-id unchanged.
-- [ ] The owner squash-merges PR2 after the clean verdict.
+- [x] Root's clean verdict at the exact head SHA.
+- [x] Bugbot triage done.
+- [x] Rebased onto current trunk after the verdict, patch-id unchanged.
+- [x] The owner squash-merges PR2 after the clean verdict.
 
 ## Splice the event bridge (PR3)
 
