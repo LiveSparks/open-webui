@@ -12,14 +12,16 @@ Tests alone are not sufficient verification. A PR is verified only when its unit
 
 Every box works in poteto style. The plan builds on the closed decision tickets of the wayfinder map "Open WebUI x pi agent engine", and Appendix D lists them by name.
 
+The fork works on the `dev` branch. Docs and agent support files (`docs/agents/`) live on `dev`, and every PR targets `dev`. `trunk` in this plan means the `dev` branch. A stable merge carries `dev` into `main` and that merge gets the release tag; `main` stays free of agent support files. Upstream syncs merge from the `upstream` remote (`open-webui/open-webui`), never from `origin/dev`.
+
 ## Program checklist
 
 ### Arm the program
 
 - [ ] State the protocol and this plan to the operator, then stop. Start execution only on the operator's explicit go.
 - [ ] Read these from trunk at program start. Re-read them at every tick.
-  - [ ] `git show origin/main:GLOSSARY.md`, `git show origin/main:docs/adr/0001-event-bridge-translates-in-python.md` through `0005-inlet-outlet-contract.md`
-  - [ ] `git show origin/main:docs/plan/pi-engine-plan.md`, `docs/research/sidecar-packaging.md`, `docs/research/chat-parity-strategy.md`, `docs/research/opencode-go-provider.md`
+  - [ ] `git show dev:GLOSSARY.md`, `git show dev:docs/adr/0001-event-bridge-translates-in-python.md` through `0005-inlet-outlet-contract.md`
+  - [ ] `git show dev:docs/plan/pi-engine-plan.md`, `docs/research/sidecar-packaging.md`, `docs/research/chat-parity-strategy.md`, `docs/research/opencode-go-provider.md`
   - [ ] The agent store copies of `poteto-mode/playbooks/orchestrate.md`, `poteto-mode/playbooks/opening-a-pr.md`, `swarm/SKILL.md`, `show-me-your-work/SKILL.md` (they live at `/root/.pi/agent/skills`, not in this repository)
   - [ ] The parity suite contract at the forked tests repository, `docs/regression-test-contract.md`
 - [ ] Record which swarm worker model runs the live lanes. Default `grok-4.7-xhigh-fast` because no `/setup-pstack` rule for a per-role model exists.
@@ -32,7 +34,7 @@ Every box works in poteto style. The plan builds on the closed decision tickets 
 
 - [ ] Spawn one owner agent per PR with the full lifecycle the execution playbook names. Give each owner the plan section, its decision tickets, and the survey pointers in Appendix D.
 - [ ] Follow this dependency graph. Start dependent work only after its parent merges, or base it on the parent branch when the execution playbook stacks.
-  - [ ] PR1 is independent and first. It branches from `main`.
+  - [ ] PR1 is independent and first. It branches from `dev`.
   - [ ] PR2 and PR3 come after PR1.
   - [ ] PR4 comes after PR3.
   - [ ] PR5, PR6, PR7, PR8, PR12, and PR13 come after PR4.
@@ -46,7 +48,7 @@ Every box works in poteto style. The plan builds on the closed decision tickets 
 ### PR mechanics, for every PR
 
 - [ ] Resolve the forge once. Default to `gh`; if `command -v origin` succeeds and Origin can resolve `LiveSparks/open-webui`, use `origin pr` for every PR operation. Record any fallback to `gh`. Never require `gt`.
-- [ ] Open the PR ready, never draft, per `poteto-mode/playbooks/opening-a-pr.md`. Use `gh pr create --repo LiveSparks/open-webui --base main`. A stack child targets its parent branch instead of `main`.
+- [ ] Open the PR ready, never draft, per `poteto-mode/playbooks/opening-a-pr.md`. Use `gh pr create --repo LiveSparks/open-webui --base dev`. A stack child targets its parent branch instead of `dev`. PRs never target `main`; `main` receives the stable-point merge, which gets the release tag.
 - [ ] Run the repo's checks once before the PR-facing push. Backend runs `ruff format --check backend` plus `pylint backend/`. Frontend runs `npm run lint` and `npm run check`. The sidecar runs its own lint and typecheck from `sidecar/package.json`.
 - [ ] Run `deslop` before each commit and `no-comments` before review.
 - [ ] Triage every Bugbot and security-reviewer comment per `poteto-mode/references/bugbot-triage.md`.
