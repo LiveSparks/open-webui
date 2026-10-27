@@ -6,6 +6,8 @@
 set -euo pipefail
 
 MAP=1
+REPO=LiveSparks/open-webui
+export GH_REPO="$REPO"
 OUT="$(dirname "$0")/tracker-snapshot.md"
 
 tmp="$(mktemp)"

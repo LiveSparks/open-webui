@@ -25,6 +25,9 @@ Decisions locked in the charting session:
 
 Skills every session should consult: read `GLOSSARY.md` and `docs/adr/` per `docs/agents/domain.md`; use the research skill for external facts.
 
+- **Branching and releases**: development happens on the fork's `dev` branch. All docs (ADRs, plan, research) and the agent support files (`docs/agents/`) live there, and every PR targets `dev`. At a stable point `dev` merges into `main` and that merge gets the release tag; `main` stays free of agent support files. Upstream syncs merge from the new `upstream` remote (`open-webui/open-webui`), never from `origin/dev`, which is now the fork's working branch.
+- **Execution**: since charting, an orchestrate program implements the locked decisions as PR1 through PR14 per `docs/plan/pi-engine-plan.md` (on `dev`). PR1 and PR2 are merged; PR3 (event bridge) is next. The program store is the local directory `.orchestrate/pi-engine/` (session state, gates, decision trail). The store coordinates sessions; the durable record lives in PR bodies, ADRs, and this map. Worker agent in this install is `worker` (no `poteto-agent`); forge is `gh`, no `origin` CLI.
+
 Standing preference — snapshot durability: the map and its tickets are committed to git as a backup after every change. After any edit to the map body or any ticket, run `docs/agents/tracker-snapshot.sh` (lives on the \`tracker/snapshot\` branch) and commit the regenerated \`docs/agents/tracker-snapshot.md\` to that branch, then push. Read the snapshot only when the tracker is unavailable; GitHub issues stay the canonical copy.
 
 Standing preference — plain language, everywhere: all communication with the human and all prose written into the repo (tickets, specs, comments, docs, code) must read like one person talking plainly to another. No jargon, no shorthand, no walls of linked numbers. If a technical term carries real weight (a glossary term, a package name), say it once and explain it in everyday words next to it. Applies to replies, narration, and code comments alike; for tickets in particular, prefer short sentences a non-engineer could follow.
@@ -69,6 +72,8 @@ Standing preference — plain language, everywhere: all communication with the h
 
 - [Idle sessions stay loaded in the sidecar: eviction policy for one shared process hosting many chats](https://github.com/LiveSparks/open-webui/issues/29): an idle chat's in-memory copy is just a cache; drop it after 15 minutes idle (50 loaded at most), reload from disk on the next message, and nothing is lost because the disk copy is the source of truth.
 
+- [How does this fork deploy? (ADR 0007)](https://github.com/LiveSparks/open-webui/blob/dev/docs/adr/0007-wheel-install-no-local-models.md): the one deployment shape is a bare-metal wheel (`uv tool install` from the fork's wheel, started by the packaged `open-webui serve` launcher that hosts the sidecar); the image is proven but not an acceptance criterion; torch, ollama, whisper, and sentence-transformers never install and no weights prewarm; RAG embedding defaults external-only, backend fix in PR4. Amends the packaging decision above and carries the operator's docs-on-`dev` ruling.
+
 ## Not yet specified
 
 <!-- in-scope fog, graduation slot -->
@@ -85,6 +90,7 @@ The driving human keeps proven local fixes at `/root/owui-customizations` (patch
 
 1. **Per-chat terminal memory** (one feature across `patches/middleware.py.patch` + two frontend bundle patches). A saved chat remembers which terminal it used: the backend saves a changed terminal id on the chat record when a message arrives (with `touch=False` so sidebar ordering doesn't jump), the frontend writes the switch back through the ordinary chat-update API, and reopening a chat restores its terminal from the record, falling back to the last message's `meta.terminal_id`. Status in 0.12.3: still absent; restore comes from browser-global localStorage only (`src/routes/(app)/+layout.svelte:431`), `terminal_id` is recorded per message but never on the chat, and models can pin a scoped default terminal (`backend/open_webui/routers/models.py:950`, applied in `Chat.svelte:1232`). Home in the new design: the machine-binding story (chat remembers its machine, restored on open).
 2. **Sync tool offload** (`patches/tools.py.patch`). Upstream runs plain-Python (non-async) tool functions directly on the event loop, so a tool that makes a blocking call back to the OWUI server itself deadlocks a single-worker uvicorn. The patch offloads sync tools to a worker thread (`asyncio.to_thread`). Status in 0.12.3: still broken (`backend/open_webui/utils/tools.py:319` runs sync tools on the loop; `backend/open_webui/utils/middleware.py:1134` awaits tool calls on the loop). Home in the new design: a guard the tool bridge must carry, since OWUI keeps executing bridged Python tools.
+
 
 
 
