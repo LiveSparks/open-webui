@@ -75,6 +75,31 @@ def is_agent_model(model_id: str) -> bool:
     return bool(sidecar_base_url()) and model_id in AGENT_LOOP_MODEL_IDS
 
 
+def is_internal_task_call(metadata: dict) -> bool:
+    """Whether a `generate_chat_completion` payload is a loop-owned Python task call.
+
+    Every task-registry call site (title, tags, follow-ups in `routers/tasks.py`,
+    function calling, memory review, context compaction) marks its metadata with
+    `task`; a user-facing chat turn never does. One decision at the dispatch, so
+    those calls keep their ordinary Python path and never touch the sidecar per
+    the plan box "title, tags, and follow-ups keep their
+    `background_tasks_handler` plumbing"."""
+    return bool(metadata.get('task'))
+
+
+def _delivery_mode(metadata: dict) -> str:
+    """Pick the sidecar's tool approval gate for this turn.
+
+    'ask' raises the approval card on every tool call; 'full' runs them
+    silently (trunk's ungated mode). An explicit AGENT_TOOL_APPROVAL_MODE wins;
+    otherwise 'ask' — the operator's approval-first posture for agent models.
+    """
+    forced = os.environ.get('AGENT_TOOL_APPROVAL_MODE', 'ask').strip().lower()
+    if forced in {'ask', 'full'}:
+        return forced
+    return 'full'
+
+
 # ---------------------------------------------------------------------------
 # Sidecar client: the five routes the bridge needs.
 # ---------------------------------------------------------------------------
@@ -104,14 +129,28 @@ async def abort_session(client: httpx.AsyncClient, chat_id: str) -> dict:
     return response.json()
 
 
+async def interact_session(client: httpx.AsyncClient, chat_id: str, call_id: str, action: str) -> dict:
+    """Deliver a browser decision to the gate holding the sidecar run."""
+    response = await client.post(f'/sessions/{chat_id}/interact', json={'id': call_id, 'action': action})
+    if response.status_code == 409:
+        # The gate is already gone: the run resolved or ended by itself.
+        return {'ok': False, 'stale': True}
+    response.raise_for_status()
+    return response.json()
+
+
 async def stream_sidecar_events(
     client: httpx.AsyncClient,
     chat_id: str,
     message: str,
+    tool_approval: str = 'full',
 ) -> AsyncIterator[tuple[str, dict]]:
     """Yield `(event, data)` frames from the sidecar prompt SSE stream."""
     async with client.stream(
-        'POST', f'/sessions/{chat_id}/prompt', json={'message': message}, timeout=None
+        'POST',
+        f'/sessions/{chat_id}/prompt',
+        json={'message': message, 'toolApproval': tool_approval},
+        timeout=None,
     ) as response:
         if response.status_code >= 400:
             body = (await response.aread()).decode('utf-8', 'replace')
@@ -164,6 +203,9 @@ class PiEventTranslator:
         self.output_index = 0
         # pi content block index -> (item type, emitted output index)
         self.block_items: dict[int, tuple[str, int]] = {}
+        # call_id -> (output index, live item dict): the function-call items
+        # the interaction route can still act on (issue 6: approvals).
+        self.call_items: dict[str, tuple[int, dict]] = {}
         self.usage: dict | None = None
         self.error: dict | None = None
         self.aborted = False
@@ -182,6 +224,14 @@ class PiEventTranslator:
         item['_output_index'] = self.output_index
         self.output_index += 1
         return self._line(payload)
+
+    def _added_and_done(self, item: dict) -> int:
+        """Emit the item as added then done; returns its output index."""
+        output_index = self.output_index
+        self._added(item)
+        item.pop('_output_index', None)
+        self._line({'type': 'response.output_item.done', 'output_index': output_index, 'item': item})
+        return output_index
 
     def _done_item(self, item: dict) -> str:
         output_index = item.pop('_output_index', self.output_index - 1)
@@ -215,6 +265,29 @@ class PiEventTranslator:
                 yield line
             self.lines.clear()
         if event_type == 'message_start' and (data.get('message') or {}).get('role') == 'assistant':
+            return
+
+        if event_type == 'owui_interaction':
+            # A tool call hit the sidecar's approval gate; the call blocks
+            # until the browser answers through the chats resolve route, which
+            # posts the decision to the sidecar interaction route. Surface the
+            # pending card and stop the message so the browser resolves it.
+            interaction = data.get('interaction') or {}
+            call_id = interaction.get('id')
+            tracked = self.call_items.get(call_id) if call_id else None
+            tool_name = interaction.get('toolName', 'tool')
+            if tracked:
+                index, item = tracked
+                item['status'] = 'pending'
+                yield self._line({'type': 'response.output_item.done', 'output_index': index, 'item': item})
+                await self._emit(
+                    {
+                        'type': 'chat:interaction:pending',
+                        'data': {'call_id': call_id, 'tool_name': tool_name},
+                    }
+                )
+            else:
+                log.warning('agent bridge: interaction for untracked call %s (tool %s)', call_id, tool_name)
             return
 
         if event_type == 'message_update':
@@ -254,10 +327,13 @@ class PiEventTranslator:
                     'call_id': call_id,
                     'name': tool_call.get('name', ''),
                     'arguments': arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False),
-                    'status': 'completed',
+                    'status': 'in_progress',
                 }
-                yield self._added(item)
-                yield self._done_item(item)
+                emitted_index = self._added_and_done(item)
+                # Track for the approval card (pending) and the final
+                # completed stamp when the executed result lands.
+                if emitted_index is not None:
+                    self.call_items[call_id] = (emitted_index, item)
             return
 
         if event_type == 'message_end':
@@ -303,6 +379,17 @@ class PiEventTranslator:
                 'output': [{'type': 'input_text', 'text': result_text or 'done'}],
                 'status': 'failed' if data.get('isError') else 'completed',
             }
+            tracked = self.call_items.pop(call_id, None)
+            if tracked:
+                index, tracked_item = tracked
+                if data.get('isError') and tracked_item.get('status') == 'pending':
+                    # A gated call the browser denied: pi skipped execution and
+                    # completed it as an immediate error result.
+                    tracked_item['status'] = 'rejected'
+                    yield self._line({'type': 'response.output_item.done', 'output_index': index, 'item': tracked_item})
+                else:
+                    tracked_item['status'] = 'completed'
+                    yield self._line({'type': 'response.output_item.done', 'output_index': index, 'item': tracked_item})
             yield self._added(item)
             yield self._done_item(item)
             await self._emit(
@@ -375,10 +462,25 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
     the marker header routes `process_chat_response` to the agent handler so
     persistence, outlet, and background tasks stay loop-owned in Python.
     """
-    chat_id = (form_data.get('metadata') or {}).get('chat_id') or ''
     metadata = form_data.get('metadata') or {}
+    chat_id = metadata.get('chat_id') or ''
     messages = form_data.get('messages') or []
+    if not chat_id:
+        # Guard the boundary (fix round 1): an empty chat_id would otherwise
+        # reach the sidecar sessions lookup as `chatId: ""` and answer 500.
+        raise HTTPException(status_code=400, detail='chat_id is required for the agent loop.')
     head, turns, ends_with_assistant = _split_head_and_turns(messages)
+
+    disposition = metadata.get('tool_approval_resume')
+    if disposition and metadata.get('assistant_message_id'):
+        # Approvals ride the translator's interaction callbacks (issue 6): the
+        # browser's approve/deny lands through the chats resolve route, the
+        # approval resume re-enters here with the persisted decision, and the
+        # sidecar interaction route delivers it to the gate that holds the
+        # run. The run's own bridge stream (still open on the paused gate)
+        # carries the verdict to the chat; this resume turn itself lands
+        # nothing, so the agent handler steps aside.
+        return await resolve_agent_interaction(metadata)
 
     prompt_text = ''
     keep_turns = 0
@@ -417,10 +519,14 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
             # to just before the resent turn (issue 6, ADR 0005).
             await fork_session(client, chat_id, keep_turns)
 
+        # The gate mode for this run: 'ask' raises the approval card, 'full'
+        # runs tool calls silently (trunk's ungated mode).
+        tool_approval = _delivery_mode(metadata)
+
         async def sse_stream() -> AsyncIterator[str]:
             translator = PiEventTranslator()
             try:
-                async for event, data in stream_sidecar_events(client, chat_id, prompt_text):
+                async for event, data in stream_sidecar_events(client, chat_id, prompt_text, tool_approval):
                     async for line in translator.translate(event, data):
                         yield line
                     for line in translator.flush_lines():
@@ -473,6 +579,63 @@ async def _steer_acknowledgement() -> AsyncIterator[str]:
     yield 'data: [DONE]\n\n'
 
 
+async def _empty_acknowledgement() -> AsyncIterator[str]:
+    """A resolution turn that lands nothing of its own."""
+    yield 'data: [DONE]\n\n'
+
+
+async def resolve_agent_interaction(metadata: dict) -> StreamingResponse:
+    """The approval-resume turn: carry the browser's decision to the sidecar.
+
+    The chats resolve route already wrote the decision into the assistant
+    message (approve, or a rejected call with its error output). Read it from
+    the persisted message, post it to the sidecar interaction route, and hand
+    back a no-op stream: the run's own bridge stream, still open on the gate,
+    finalizes the message with the resumed answer.
+    """
+    from open_webui.models.chats import Chats as _Chats
+
+    chat_id = metadata.get('chat_id') or ''
+    message_id = metadata.get('assistant_message_id') or ''
+    assistant_message = await _Chats.get_message_by_id_and_message_id(chat_id, message_id)
+    call_id, action = None, 'approve'
+    if assistant_message:
+        output = assistant_message.get('output') or []
+        has_rejected_output = any(
+            item.get('type') == 'function_call_output' and item.get('status') == 'rejected'
+            for item in output
+            if isinstance(item, dict)
+        )
+        for item in output:
+            if not isinstance(item, dict) or item.get('type') != 'function_call':
+                continue
+            if item.get('status') == 'queued' and item.get('approved') is True and not has_rejected_output:
+                call_id, action = item.get('call_id') or item.get('id'), 'approve'
+                break
+            if item.get('status') == 'rejected' or has_rejected_output:
+                call_id, action = item.get('call_id') or item.get('id'), 'reject'
+                break
+    if not call_id:
+        log.info(
+            'agent bridge: approval resume for %s/%s found no decision, leaving the gate as it is', chat_id, message_id
+        )
+        return StreamingResponse(
+            _empty_acknowledgement(),
+            media_type='text/event-stream',
+            headers={'x-agent-loop': 'pi', 'x-agent-interaction': 'stale'},
+        )
+    try:
+        result = await interact_session(_client(), chat_id, call_id, action)
+        log.info('agent bridge: interaction %s for %s/%s resolved: %s', action, chat_id, message_id, result)
+    except Exception:
+        log.exception('agent bridge: interaction delivery failed for %s/%s', chat_id, message_id)
+    return StreamingResponse(
+        _empty_acknowledgement(),
+        media_type='text/event-stream',
+        headers={'x-agent-loop': 'pi', 'x-agent-interaction': 'delivered'},
+    )
+
+
 # ---------------------------------------------------------------------------
 # The agent response handler: the loop-owned Python plumbing (persistence,
 # redis stream snapshots, outlet, background tasks) applied to the
@@ -494,6 +657,12 @@ async def agent_chat_response_handler(response: StreamingResponse, ctx: dict):
     chat_id = metadata.get('chat_id') or ''
     save_to_chat = is_saved_chat_id(chat_id)
     response_stream_task_id = metadata.get('task_id') or metadata.get('message_id')
+
+    if metadata.get('tool_approval_resume'):
+        # The interaction-resolution turn: the run's own bridge stream (still
+        # open on the sidecar's gate) carries the decision and finalizes the
+        # message. This turn landed nothing and owns nothing.
+        return None
 
     # Pre-stream events from process_chat_payload (e.g. RAG sources), same as
     # the standard handler's first loop.
@@ -558,6 +727,25 @@ async def agent_chat_response_handler(response: StreamingResponse, ctx: dict):
 
             direct = data.get('x-owui-event')
             if isinstance(direct, dict):
+                if direct.get('type') == 'chat:interaction:pending':
+                    # A gated tool call awaits the browser: persist the pending
+                    # card now (the approval route reads the saved message) and
+                    # stop the message so the browser resolves it. The run
+                    # itself is blocked on the sidecar's gate; its verdict and
+                    # the resumed answer arrive later on this same stream.
+                    if save_to_chat:
+                        try:
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata['chat_id'],
+                                metadata['message_id'],
+                                {'done': False, 'output': output},
+                                touch=False,
+                            )
+                        except Exception:
+                            log.exception('agent bridge: pending interaction persist failed')
+                    if event_emitter:
+                        await event_emitter({'type': 'chat:completion', 'data': {'done': False, 'output': output}})
+                    continue
                 if event_emitter:
                     try:
                         await event_emitter(direct)
@@ -601,6 +789,11 @@ async def agent_chat_response_handler(response: StreamingResponse, ctx: dict):
     for item in output:
         if item.get('status') == 'in_progress':
             item['status'] = 'incomplete' if cancelled or error else 'completed'
+        elif item.get('status') == 'pending':
+            # A gated call the run ended without resolving (the browser never
+            # answered): nothing will execute it again, so land it rejected
+            # like the stop path finalizes approval cards.
+            item['status'] = 'rejected'
 
     usage = normalize_usage(usage or {})
     current_output = output

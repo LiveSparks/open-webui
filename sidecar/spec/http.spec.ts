@@ -68,6 +68,25 @@ describe("HTTP surface", () => {
 		});
 	});
 
+	it("answers POST /sessions/{chat}/interact with the delivered decision, 409 when no gate waits", async () => {
+		await listenOnEphemeral(async (_server, port) => {
+			await fetch(`http://127.0.0.1:${port}/sessions`, { method: "POST", body: JSON.stringify({ chatId: "chat-idle-interact" }) });
+
+			const idle = await fetch(`http://127.0.0.1:${port}/sessions/chat-idle-interact/interact`, {
+				method: "POST",
+				body: JSON.stringify({ id: "call_fake_1", action: "approve" }),
+			});
+			expect(idle.status).toBe(409);
+			expect(((await idle.json()) as { ok: boolean }).ok).toBe(false);
+
+			const rejectedShape = await fetch(`http://127.0.0.1:${port}/sessions/chat-idle-interact/interact`, {
+				method: "POST",
+				body: JSON.stringify({ id: "call_fake_1", action: "maybe" }),
+			});
+			expect(rejectedShape.status).toBe(400);
+		});
+	});
+
 	it("rejects POST /sessions/{chat}/prompt with a mismatched client version", async () => {
 		await listenOnEphemeral(async (_server, port) => {
 			const create = await fetch(`http://127.0.0.1:${port}/sessions`, {

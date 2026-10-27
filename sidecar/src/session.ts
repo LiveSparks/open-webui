@@ -7,11 +7,13 @@ import {
 	type AgentSession,
 	createAgentSession,
 	createExtensionRuntime,
+	createSyntheticSourceInfo,
 	defineTool,
+	type Extension,
+	type ModelRuntime,
 	SessionManager,
 	SettingsManager,
 	type ToolDefinition,
-type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import type { SidecarConfig } from "./config.ts";
@@ -39,11 +41,27 @@ export const echoTool: ToolDefinition = defineTool({
 
 type ChatState = "idle" | "running";
 
+/**
+ * The interaction gate (issue 6: approvals)。 In 'ask' mode every tool call
+ * pauses inside pi's `tool_call` hook until the bridge delivers the browser's
+ * decision through the interact route; 'full' runs tool calls silently, the
+ * same ungated behavior as trunk's tool loop.
+ */
+export interface InteractionGate {
+	ask: boolean;
+	waiter: { id: string; resolve: (approved: boolean) => void } | null;
+	/** The prompt SSE writer for the run in flight, or null between runs. */
+	pump: ((event: unknown) => void) | null;
+}
+
+export type InteractionAction = "approve" | "reject";
+
 interface ChatEntry {
 	chatId: string;
 	session: AgentSession;
 	state: ChatState;
 	resumed: boolean;
+	gate: InteractionGate;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
 	abortRequested: boolean;
 	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
@@ -85,6 +103,7 @@ export class UnknownChatError extends Error {
  * lifecycle decision (issue 9): one shared sidecar process, independent chats,
  * JSONL sessions under AGENT_SESSIONS/<chat_id>/, resume by chat id, abort().
  */
+const INTERACTION_EXTENSION_PATH = "<inline:owui-tool-gate>";
 const IDLE_TTL_MS_DEFAULT = 15 * 60 * 1000;
 const MAX_LOADED_SESSIONS_DEFAULT = 50;
 const SWEEP_INTERVAL_MS = 30 * 1000;
@@ -199,6 +218,25 @@ export class SessionRegistry {
 		return this.chats.has(chatId);
 	}
 
+	/**
+	 * Deliver a browser decision to the gate holding a run. False when no
+	 * gate is waiting for that id (the call already resolved or the run
+	 * ended), so the bridge can treat it as stale rather than an error.
+	 */
+	interact(chatId: string, id: string, action: InteractionAction): boolean {
+		const waiter = this.chats.get(chatId)?.gate.waiter;
+		if (!waiter || waiter.id !== id) return false;
+		this.chats.get(chatId)!.gate.waiter = null;
+		waiter.resolve(action === "approve");
+		return true;
+	}
+
+	/** Pending interaction ids per chat, for the registry health story. */
+	pendingInteractions(chatId: string): string[] {
+		const waiter = this.chats.get(chatId)?.gate.waiter;
+		return waiter ? [waiter.id] : [];
+	}
+
 	/** Idempotent: a second get() for a live chat returns the same entry. */
 	async get(chatId: string, system?: string): Promise<ChatEntry> {
 		validateChatId(chatId);
@@ -216,6 +254,7 @@ export class SessionRegistry {
 			? SessionManager.open(latest, sessionDir)
 			: SessionManager.create(this.config.cwd, sessionDir);
 
+		const gate: InteractionGate = { ask: false, waiter: null, pump: null };
 		const { session } = await createAgentSession({
 			cwd: this.config.cwd,
 			modelRuntime: this.modelRuntime,
@@ -232,7 +271,7 @@ export class SessionRegistry {
 			}),
 			// The prompt head (system + injections) hands off wholesale from the
 			// Python backend (issue 4); an empty head falls back to the default.
-			resourceLoader: minimalResourceLoader(system),
+			resourceLoader: minimalResourceLoader(system, buildInteractionExtension(gate)),
 		});
 
 		const now = Date.now();
@@ -241,6 +280,7 @@ export class SessionRegistry {
 			session,
 			state: "idle",
 			resumed: Boolean(latest),
+			gate,
 			abortRequested: false,
 			lastUsedAt: now,
 			lastUsedSeq: this.touch(),
@@ -323,7 +363,12 @@ export class SessionRegistry {
 	}
 
 	/** One active run per chat: a second prompt() while running is a conflict, because the backend serializes sends into steer. */
-	async prompt(chatId: string, text: string, onEvent: SessionEventHandler): Promise<PromptResult> {
+	async prompt(
+		chatId: string,
+		text: string,
+		onEvent: SessionEventHandler,
+		options?: { toolApproval?: "ask" | "full" },
+	): Promise<PromptResult> {
 		const entry = this.chats.get(chatId);
 		if (!entry) {
 			throw new UnknownChatError(chatId);
@@ -333,6 +378,15 @@ export class SessionRegistry {
 		}
 		entry.state = "running";
 		entry.abortRequested = false;
+		entry.gate.ask = options?.toolApproval === "ask";
+		entry.gate.waiter = null;
+		entry.gate.pump = (event) => {
+			try {
+				onEvent(event);
+			} catch {
+				// a dead SSE consumer must not kill the run
+			}
+		};
 		entry.lastUsedAt = Date.now();
 		entry.lastUsedSeq = this.touch();
 		let lastStopReason: string | undefined;
@@ -351,6 +405,7 @@ export class SessionRegistry {
 				await entry.session.prompt(text);
 			} finally {
 				unsubscribe();
+				dropIncompleteGate(entry);
 			}
 		} catch (error) {
 			const result: PromptResult = {
@@ -363,6 +418,7 @@ export class SessionRegistry {
 			return result;
 		} finally {
 			entry.state = "idle";
+			dropIncompleteGate(entry);
 			entry.lastTurnEndedAt = Date.now();
 		}
 		const reason: PromptResult["reason"] =
@@ -400,6 +456,9 @@ export class SessionRegistry {
 			return false;
 		}
 		entry.abortRequested = true;
+		// A run blocked on the interaction gate ends with the call denied, not
+		// as a hung session: drop the gate first so prompt() completes.
+		dropIncompleteGate(entry);
 		await entry.session.abort();
 		return true;
 	}
@@ -426,9 +485,9 @@ export class SessionRegistry {
 	}
 }
 
-function minimalResourceLoader(system?: string) {
+function minimalResourceLoader(system?: string, ...extensions: Extension[]) {
 	return {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+		getExtensions: () => ({ extensions, errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
@@ -441,6 +500,65 @@ function minimalResourceLoader(system?: string) {
 		extendResources: () => {},
 		reload: async () => {},
 	};
+}
+
+/**
+ * The approval gate extension: one inline extension per session. In 'ask'
+ * mode it emits the interaction event into the prompt stream and blocks the
+ * tool call on the browser's decision (issue 6); 'full' never fires. A
+ * denied call blocks through pi's immediate-error path with the reason; an
+ * approved call executes normally.
+ */
+export function buildInteractionExtension(gate: InteractionGate): Extension {
+	const handler = async (event: unknown): Promise<unknown> => {
+		if (!gate.ask) return undefined;
+		const call = event as { toolCallId?: string; toolName?: string; input?: unknown };
+		const id = typeof call.toolCallId === "string" && call.toolCallId !== "" ? call.toolCallId : "";
+		if (!id) return undefined;
+		if (!gate.pump || gate.waiter) {
+			// No consumer to ask, or a gate already waits: never silently hang
+			// the run on an unanswerable gate.
+			return undefined;
+		}
+		gate.pump({
+			type: "owui_interaction",
+			interaction: { id, toolName: call.toolName ?? "tool", arguments: call.input },
+		});
+		return await new Promise<boolean>((resolve) => {
+			gate.waiter = { id, resolve };
+		}).then((approved) =>
+			approved ? undefined : { block: true, reason: "Tool call rejected by the user." },
+		);
+	};
+	return {
+		path: INTERACTION_EXTENSION_PATH,
+		resolvedPath: INTERACTION_EXTENSION_PATH,
+		hidden: true,
+		replaceable: true,
+		sourceInfo: createSyntheticSourceInfo(INTERACTION_EXTENSION_PATH, {
+			source: "inline",
+			scope: "temporary",
+			origin: "top-level",
+		}),
+		handlers: new Map([["tool_call", [handler]]]),
+		tools: new Map(),
+		messageRenderers: new Map(),
+		entryRenderers: new Map(),
+		commands: new Map(),
+		flags: new Map(),
+		shortcuts: new Map(),
+	};
+}
+
+/** Whether a waiter vanished without being answered (prompt teardown). */
+function dropIncompleteGate(entry: ChatEntry): void {
+	const waiter = entry.gate.waiter;
+	if (waiter) {
+		entry.gate.waiter = null;
+		waiter.resolve(false);
+	}
+	entry.gate.ask = false;
+	entry.gate.pump = null;
 }
 
 export function resolveModel(config: SidecarConfig, modelRuntime: ModelRuntime): Model<Api> {

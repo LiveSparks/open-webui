@@ -2,7 +2,7 @@ import http from "node:http";
 import type { SidecarConfig } from "./config.ts";
 import { ConfigError, validateChatId } from "./config.ts";
 import type { SessionRegistry } from "./session.ts";
-import { SessionConflictError, UnknownChatError } from "./session.ts";
+import { SessionConflictError, UnknownChatError, type InteractionAction } from "./session.ts";
 const MAX_BODY_BYTES = 1024 * 1024;
 
 export interface HttpSurface {
@@ -122,6 +122,8 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 			switch (action) {
 				case "prompt":
 					return handlePrompt(chatId, req, res);
+				case "interact":
+					return handleInteract(chatId, req, res);
 				case "steer":
 					return handleSteer(chatId, req, res);
 				case "abort":
@@ -199,6 +201,9 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 		}
 		const body = await readJsonBody(req);
 		const message = requireString(body, "message");
+		// The approval gate for this run (issue 6): 'ask' pauses every tool
+		// call on the browser's decision, 'full' runs them silently.
+		const toolApproval = body["toolApproval"] === "ask" ? "ask" : "full";
 
 		writeSseHead(res);
 		const onEvent = (event: unknown) => {
@@ -215,7 +220,7 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 
 		let result;
 		try {
-			result = await registry.prompt(chatId, message, onEvent);
+			result = await registry.prompt(chatId, message, onEvent, { toolApproval });
 		} catch (error) {
 			if (error instanceof SessionConflictError) {
 				writeSseFrame(res, "error", { ok: false, error: error.message });
@@ -230,6 +235,35 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 		}
 		writeSseFrame(res, "done", result);
 		res.end();
+	}
+
+	/** Deliver a browser decision to the gate holding the run (issue 6). */
+	async function handleInteract(chatId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+		if (!registry.has(chatId)) {
+			writeJson(res, 404, { ok: false, error: `no session for chat ${chatId}` });
+			return;
+		}
+		const body = await readJsonBody(req);
+		const id = requireString(body, "id");
+		const action = body["action"];
+		if (action !== "approve" && action !== "reject") {
+			writeJson(res, 400, { ok: false, error: 'body field "action" must be "approve" or "reject"' });
+			return;
+		}
+		try {
+			const delivered = registry.interact(chatId, id, action as InteractionAction);
+			if (!delivered) {
+				writeJson(res, 409, { ok: false, error: `no interaction waiting for ${id}` });
+				return;
+			}
+			writeJson(res, 200, { ok: true, chatId, id, action });
+		} catch (error) {
+			if (error instanceof UnknownChatError) {
+				writeJson(res, 404, { ok: false, error: error.message });
+				return;
+			}
+			throw error;
+		}
 	}
 
 	async function handleSteer(chatId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
