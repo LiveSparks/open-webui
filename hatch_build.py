@@ -46,7 +46,7 @@ def build_sidecar(build_data):
     stderr.write('\n### build the agent sidecar\n')
     # build.sh owns the recipe (npm ci, tsc, prune) so the wheel and the image
     # build cannot drift apart.
-    subprocess.run(['./build.sh'], cwd=cwd, check=True)  # noqa: S603
+    subprocess.run(['./build.sh'], cwd=os.path.join(cwd, 'sidecar'), check=True)  # noqa: S603
 
     for source, destination in SIDECAR_FORCE_INCLUDE.items():
         if os.path.exists(os.path.join(cwd, source)):
