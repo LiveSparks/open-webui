@@ -37,7 +37,12 @@ def _resolve_entrypoint(env):
     return None
 
 
-def launch():
+def launch(exit_hook: bool = True):
+    # exit_hook=True fits a caller that runs the server in-process (serve):
+    # the sidecar dies with it, so nothing is orphaned. exit_hook=False fits a
+    # shell bootstrap (start.sh) that execs the server right after: from that
+    # point the container or service manager owns the whole process group and
+    # the sidecar must survive the launcher subprocess exiting.
     env = os.environ
     missing = [name for name in REQUIRED if not env.get(name, '').strip()]
     if len(missing) == len(REQUIRED):
@@ -67,7 +72,8 @@ def launch():
         threading.Thread(target=_pump, args=(child,), daemon=True).start()
         if _healthy(child, port, timeout_s):
             print(f'agent sidecar healthy on port {port}', flush=True)
-            atexit.register(_stop, child)
+            if exit_hook:
+                atexit.register(_stop, child)
             return child
         if child.poll() is None:
             print(f'agent sidecar did not report healthy in {timeout_s}s, stopping it', flush=True)

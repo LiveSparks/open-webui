@@ -72,7 +72,7 @@ fi
 # open_webui.utils.sidecar_launch so the image and the packaged wheel share
 # one implementation; it retries with backoff and always lets uvicorn serve.
 if [[ -n "${AGENT_SIDECAR_PORT:-}" ]]; then
-  "$PYTHON_CMD" -c 'import open_webui.utils.sidecar_launch as s; s.launch()' || true
+  "$PYTHON_CMD" -c 'import open_webui.utils.sidecar_launch as s; s.launch(exit_hook=False)' || true
 fi
 
 # ── HuggingFace Space deployment ─────────────────────────────────────────────
