@@ -12,6 +12,7 @@ from open_webui.env import BYPASS_MODEL_ACCESS_CONTROL, GLOBAL_LOG_LEVEL
 from open_webui.functions import generate_function_chat_completion
 from open_webui.models.models import Models
 from open_webui.models.users import UserModel
+from open_webui.routers.agent import generate_agent_chat_completion, is_agent_model
 from open_webui.routers.ollama import (
     generate_chat_completion as generate_ollama_chat_completion,
 )
@@ -280,6 +281,10 @@ async def generate_chat_completion(
         if model.get('pipe'):
             # Below does not require bypass_filter because this is the only route the uses this function and it is already bypassing the filter
             return await generate_function_chat_completion(request, form_data, user=user, models=models)
+        if is_agent_model(model_id):
+            # The agent loop: the sidecar hosts pi sessions; the bridge
+            # translates its SSE for the standard response handler.
+            return await generate_agent_chat_completion(request, form_data, user)
         if model.get('owned_by') == 'ollama':
             # Apply before Ollama conversion so tool follow-ups keep the model system prompt
             if not bypass_system_prompt:

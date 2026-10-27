@@ -3,7 +3,6 @@ import type { SidecarConfig } from "./config.ts";
 import { ConfigError, validateChatId } from "./config.ts";
 import type { SessionRegistry } from "./session.ts";
 import { SessionConflictError, UnknownChatError } from "./session.ts";
-
 const MAX_BODY_BYTES = 1024 * 1024;
 
 export interface HttpSurface {
@@ -103,13 +102,16 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 		if (req.method === "POST" && url.pathname === "/sessions") {
 			const body = await readJsonBody(req);
 			const chatId = validateChatId(requireString(body, "chatId"));
-			const entry = await registry.get(chatId);
+			const system = typeof body.system === "string" ? body.system : undefined;
+			const entry = await registry.get(chatId, system);
 			writeJson(res, 200, {
 				ok: true,
 				chatId,
 				sessionId: entry.session.sessionId,
 				sessionFile: entry.session.sessionFile,
 				resumed: entry.resumed,
+				userTurns: registry.userTurns(chatId),
+				running: entry.state === "running",
 			});
 			return;
 		}
@@ -124,6 +126,8 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 					return handleSteer(chatId, req, res);
 				case "abort":
 					return handleAbort(chatId, res);
+				case "fork":
+					return handleFork(chatId, req, res);
 				default:
 					writeJson(res, 404, { ok: false, error: `unknown route ${url.pathname}` });
 			}
@@ -159,7 +163,33 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 			pi: config.piVersion,
 			model: `${config.modelId.provider}/${config.modelId.model}`,
 			sessions: registry.sessionCount,
+			...registry.counts,
 		});
+	}
+
+	/** Edit-resend fork-or-restore (ADR 0005): branch back before the keepTurns-th user turn. */
+	async function handleFork(chatId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+		const body = await readJsonBody(req);
+		const raw = body["keepTurns"];
+		const keepTurns = typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
+		if (keepTurns === undefined) {
+			writeJson(res, 400, { ok: false, error: 'body field "keepTurns" must be a non-negative integer' });
+			return;
+		}
+		try {
+			const result = await registry.fork(chatId, keepTurns);
+			writeJson(res, 200, { ok: true, chatId, ...result });
+		} catch (error) {
+			if (error instanceof UnknownChatError) {
+				writeJson(res, 404, { ok: false, error: error.message });
+				return;
+			}
+			if (error instanceof SessionConflictError) {
+				writeJson(res, 409, { ok: false, error: error.message });
+				return;
+			}
+			throw error;
+		}
 	}
 
 	async function handlePrompt(chatId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

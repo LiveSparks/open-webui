@@ -1,5 +1,7 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { setInterval } from "node:timers";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
 	type AgentSession,
@@ -44,6 +46,14 @@ interface ChatEntry {
 	resumed: boolean;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
 	abortRequested: boolean;
+	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
+	lastUsedAt: number;
+	/** Monotonic tiebreaker over lastUsedAt: a strict LRU order. */
+	lastUsedSeq: number;
+	/** When the last prompt() finished; the idle-TTL clock starts here. */
+	lastTurnEndedAt: number;
+	/** PR9 sets this for background child sessions; a parent never evicts while it is true. */
+	hasBackgroundChildren: () => boolean;
 }
 
 export interface PromptResult {
@@ -75,17 +85,114 @@ export class UnknownChatError extends Error {
  * lifecycle decision (issue 9): one shared sidecar process, independent chats,
  * JSONL sessions under AGENT_SESSIONS/<chat_id>/, resume by chat id, abort().
  */
+const IDLE_TTL_MS_DEFAULT = 15 * 60 * 1000;
+const MAX_LOADED_SESSIONS_DEFAULT = 50;
+const SWEEP_INTERVAL_MS = 30 * 1000;
+
+export interface SessionCounts {
+	loaded: number;
+	running: number;
+	evictedSinceBoot: number;
+}
+
+export interface ForkResult {
+	forked: boolean;
+	sessionId: string;
+	sessionFile?: string;
+	userTurns: number;
+}
+
+function readIdleTtlMs(): number {
+	const raw = process.env.AGENT_SESSION_IDLE_TTL_MS;
+	if (!raw) return IDLE_TTL_MS_DEFAULT;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : IDLE_TTL_MS_DEFAULT;
+}
+
+function readMaxLoadedSessions(): number {
+	const raw = process.env.AGENT_SESSION_MAX_LOADED;
+	if (!raw) return MAX_LOADED_SESSIONS_DEFAULT;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 1 ? parsed : MAX_LOADED_SESSIONS_DEFAULT;
+}
+
 export class SessionRegistry {
 	private readonly chats = new Map<string, ChatEntry>();
+	private evictedSinceBoot = 0;
+	private usedSeq = 0;
+	private readonly sweeper: ReturnType<typeof setInterval>;
 
 	constructor(
 		private readonly config: SidecarConfig,
 		private readonly modelRuntime: ModelRuntime,
 		private readonly model: Model<Api>,
-	) {}
+		private readonly idleTtlMs = readIdleTtlMs(),
+		private readonly maxLoadedSessions = readMaxLoadedSessions(),
+	) {
+		// unref keeps process exit unblocked in specs.
+		this.sweeper = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
+		this.sweeper.unref();
+	}
 
 	get sessionCount(): number {
 		return this.chats.size;
+	}
+
+	get counts(): SessionCounts {
+		let running = 0;
+		for (const entry of this.chats.values()) {
+			if (entry.state === "running") running += 1;
+		}
+		return { loaded: this.chats.size, running, evictedSinceBoot: this.evictedSinceBoot };
+	}
+
+	/**
+	 * Eviction policy (ADR 0006): the in-memory registry is a cache over the
+	 * JSONL, never the source of truth. Idle TTL after the last turn ends,
+	 * then a hard LRU cap. Never a session with a running or queued turn,
+	 * never a parent with background children alive. Eviction deletes the
+	 * registry entry only; the next get() rebuilds from the latest JSONL.
+	 */
+	sweep(now = Date.now()): number {
+		let evicted = 0;
+		for (const [chatId, entry] of this.chats) {
+			if (entry.state !== "running" && !entry.hasBackgroundChildren() && now - entry.lastTurnEndedAt >= this.idleTtlMs) {
+				this.evict(chatId, entry);
+				evicted += 1;
+			}
+		}
+		evicted += this.enforceCap();
+		return evicted;
+	}
+
+	/** LRU-first eviction down to the cap (minus a reserve for a load in
+	 * progress), skipping guarded sessions. */
+	private enforceCap(reserve = 0): number {
+		let evicted = 0;
+		while (this.chats.size + reserve > this.maxLoadedSessions) {
+			const candidate = [...this.chats.entries()]
+				.sort((a, b) => a[1].lastUsedSeq - b[1].lastUsedSeq)
+				.find(([, entry]) => entry.state !== "running" && !entry.hasBackgroundChildren());
+			if (!candidate) break;
+			this.evict(candidate[0], candidate[1]);
+			evicted += 1;
+		}
+		return evicted;
+	}
+
+	private touch(): number {
+		this.usedSeq += 1;
+		return this.usedSeq;
+	}
+
+	private evict(chatId: string, entry: ChatEntry): void {
+		this.chats.delete(chatId);
+		this.evictedSinceBoot += 1;
+		try {
+			entry.session.dispose();
+		} catch {
+			// a broken session must not block the sweep
+		}
 	}
 
 	has(chatId: string): boolean {
@@ -93,12 +200,15 @@ export class SessionRegistry {
 	}
 
 	/** Idempotent: a second get() for a live chat returns the same entry. */
-	async get(chatId: string): Promise<ChatEntry> {
+	async get(chatId: string, system?: string): Promise<ChatEntry> {
 		validateChatId(chatId);
 		const existing = this.chats.get(chatId);
 		if (existing) {
+			existing.lastUsedAt = Date.now();
+			existing.lastUsedSeq = this.touch();
 			return existing;
 		}
+		this.enforceCap(1);
 
 		const sessionDir = this.chatDir(chatId);
 		const latest = this.latestSessionFile(sessionDir);
@@ -120,12 +230,96 @@ export class SessionRegistry {
 				compaction: { enabled: false },
 				retry: { enabled: false },
 			}),
-			resourceLoader: minimalResourceLoader(),
+			// The prompt head (system + injections) hands off wholesale from the
+			// Python backend (issue 4); an empty head falls back to the default.
+			resourceLoader: minimalResourceLoader(system),
 		});
 
-		const entry: ChatEntry = { chatId, session, state: "idle", resumed: Boolean(latest), abortRequested: false };
+		const now = Date.now();
+		const entry: ChatEntry = {
+			chatId,
+			session,
+			state: "idle",
+			resumed: Boolean(latest),
+			abortRequested: false,
+			lastUsedAt: now,
+			lastUsedSeq: this.touch(),
+			lastTurnEndedAt: now,
+			hasBackgroundChildren: () => false,
+		};
 		this.chats.set(chatId, entry);
 		return entry;
+	}
+
+	/** User turns hosted by a chat's session, as the rebuilt session sees them. */
+	userTurns(chatId: string): number {
+		const entry = this.chats.get(chatId);
+		if (!entry) return 0;
+		return entry.session.messages.filter((m) => m.role === "user").length;
+	}
+
+	/**
+	 * Edit-resend fork-or-restore (issue 6, ADR 0005): restore the session to
+	 * just before the keepTurns-th user turn so the next prompt() starts the
+	 * edited turn with the truncated history. The old path stays in the old
+	 * JSONL; the fork writes a new session file with the kept path copied
+	 * verbatim and rebuilds on it (the proven resume path), so both the model
+	 * context and userTurns() reflect the fork. A keepTurns at or beyond the
+	 * hosted turns is a no-op fork.
+	 */
+	async fork(chatId: string, keepTurns: number): Promise<ForkResult> {
+		const entry = this.chats.get(chatId);
+		if (!entry) {
+			throw new UnknownChatError(chatId);
+		}
+		if (entry.state === "running") {
+			throw new SessionConflictError(chatId);
+		}
+		const sessionFile = entry.session.sessionFile;
+		if (!sessionFile) {
+			throw new Error(`chat ${chatId} has no session file to fork`);
+		}
+		const parsed = readFileSync(sessionFile, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		const userEntries = parsed.filter(
+			(e) => e.type === "message" && (e.message as { role?: string } | undefined)?.role === "user",
+		);
+		if (keepTurns >= userEntries.length) {
+			return {
+				forked: false,
+				sessionId: entry.session.sessionId,
+				sessionFile,
+				userTurns: userEntries.length,
+			};
+		}
+		const target = userEntries[keepTurns] as { id: string; parentId?: string };
+		const cutIndex = target.parentId ? parsed.findIndex((e) => e.id === target.parentId) : 0;
+		if (cutIndex < 0) {
+			throw new Error(`chat ${chatId}: fork cut parent ${target.parentId} not found`);
+		}
+		const kept = parsed.slice(0, cutIndex + 1);
+		const header = kept[0] as { type?: string; id?: string; timestamp?: string };
+		if (header.type !== "session") {
+			throw new Error(`chat ${chatId}: session file does not open with a session header`);
+		}
+		const newId = randomUUID();
+		const newHeader = { ...header, id: newId, timestamp: new Date().toISOString() };
+		// The timestamped name sorts after every existing file, so the rebuild
+		// below (and any later resume) opens the fork.
+		const newFile = join(this.chatDir(chatId), `${newHeader.timestamp!.replace(/[:.]/g, "-")}_${newId}.jsonl`);
+		writeFileSync(newFile, [JSON.stringify(newHeader), ...kept.slice(1).map((e) => JSON.stringify(e))].join("\n") + "\n");
+
+		entry.session.dispose();
+		this.chats.delete(chatId);
+		const rebuilt = await this.get(chatId);
+		return {
+			forked: true,
+			sessionId: rebuilt.session.sessionId,
+			sessionFile: rebuilt.session.sessionFile,
+			userTurns: this.userTurns(chatId),
+		};
 	}
 
 	/** One active run per chat: a second prompt() while running is a conflict, because the backend serializes sends into steer. */
@@ -139,6 +333,8 @@ export class SessionRegistry {
 		}
 		entry.state = "running";
 		entry.abortRequested = false;
+		entry.lastUsedAt = Date.now();
+		entry.lastUsedSeq = this.touch();
 		let lastStopReason: string | undefined;
 		try {
 			const unsubscribe = entry.session.subscribe((event) => {
@@ -167,6 +363,7 @@ export class SessionRegistry {
 			return result;
 		} finally {
 			entry.state = "idle";
+			entry.lastTurnEndedAt = Date.now();
 		}
 		const reason: PromptResult["reason"] =
 			entry.abortRequested || lastStopReason === "aborted"
@@ -229,7 +426,7 @@ export class SessionRegistry {
 	}
 }
 
-function minimalResourceLoader() {
+function minimalResourceLoader(system?: string) {
 	return {
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
@@ -237,7 +434,7 @@ function minimalResourceLoader() {
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
 		getSystemPrompt: () =>
-			"You are the Open WebUI chat agent. Answer directly and concisely.",
+			system?.trim() || "You are the Open WebUI chat agent. Answer directly and concisely.",
 		getSystemPromptSource: () => undefined,
 		getAppendSystemPrompt: () => [],
 		getAppendSystemPromptSources: () => [],

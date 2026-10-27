@@ -6464,6 +6464,14 @@ async def streaming_chat_response_handler(response, ctx):
 
 
 async def process_chat_response(response, ctx):
+    # Agent loop (PR3): the bridge translated the sidecar's pi SSE into the
+    # Responses stream; persistence, outlet, and background tasks stay
+    # loop-owned in Python through the agent handler.
+    if isinstance(response, StreamingResponse) and response.headers.get('x-agent-loop') == 'pi':
+        from open_webui.routers.agent import agent_chat_response_handler
+
+        return await agent_chat_response_handler(response, ctx)
+
     # Non-streaming response
     if not isinstance(response, StreamingResponse):
         return await non_streaming_chat_response_handler(response, ctx)
