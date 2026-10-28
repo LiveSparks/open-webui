@@ -92,9 +92,10 @@ def _delivery_mode(metadata: dict) -> str:
 
     'ask' raises the approval card on every tool call; 'full' runs them
     silently (trunk's ungated mode). An explicit AGENT_TOOL_APPROVAL_MODE wins;
-    otherwise 'ask' — the operator's approval-first posture for agent models.
+    otherwise 'full' — the operator's default (2026-10-28): agent tool calls
+    run ungated unless the deployment opts into the card.
     """
-    forced = os.environ.get('AGENT_TOOL_APPROVAL_MODE', 'ask').strip().lower()
+    forced = os.environ.get('AGENT_TOOL_APPROVAL_MODE', 'full').strip().lower()
     if forced in {'ask', 'full'}:
         return forced
     return 'full'
