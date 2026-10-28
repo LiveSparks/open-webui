@@ -315,9 +315,12 @@ async def get_async_tool_function_and_apply_extra_params(
             return await partial_func(*args, **coerce_kwargs(kwargs))
 
     else:
-        # Make it a coroutine function when it is not already
+        # Make it a coroutine function when it is not already. The sync body
+        # runs on a worker thread: a plain-Python tool that blocks on a call
+        # back to this server (or any slow I/O) must not occupy the event loop,
+        # which deadlocked single-worker uvicorn (sync tool offload).
         async def new_function(*args, **kwargs):
-            return partial_func(*args, **coerce_kwargs(kwargs))
+            return await asyncio.to_thread(partial_func, *args, **coerce_kwargs(kwargs))
 
     update_wrapper(new_function, function)
     new_function.__signature__ = new_sig
