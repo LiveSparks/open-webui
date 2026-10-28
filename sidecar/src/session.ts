@@ -47,6 +47,20 @@ export const echoTool: ToolDefinition = defineTool({
 
 type ChatState = "idle" | "running";
 
+/** The loopback MCP tool names are namespaced `mcp__owui__<tool>`. */
+const BRIDGE_TOOL_PREFIX = "mcp__owui__";
+/** How long a binding swap waits for the reconnect before letting the run start. */
+const BRIDGE_RECONNECT_WAIT_MS = 10_000;
+
+/**
+ * The bridge handle the session manager drives between runs: sync() applies
+ * the latest binding and returns only once the loopback tools are executable
+ * again. The extension factory replaces the placeholder sync when it binds.
+ */
+export interface BridgeControl {
+	sync: () => Promise<void>;
+}
+
 /**
  * The loopback tool bridge (PR4, issue 7): the backend mints a short-TTL
  * signed binding every turn and rides it on the session create/refresh; this
@@ -93,11 +107,11 @@ const DEFERRED_EXPOSURE_TOOLS = [
 
 /**
  * Registers the session's bridge server with pi's MCP machinery. The MCP
- * extension connects it (session_start) and reconnects it whenever a later
- * turn carries a fresh token (turn_start re-register with a changed config),
- * so a short-TTL binding outlives the turn that minted it.
+ * extension connects it on session_start; a later binding token is applied
+ * between runs through {@link BridgeControl.sync}, never inside a run, so a
+ * short-TTL binding outlives the turn that minted it.
  */
-export function buildLoopbackBridgeExtension(bindingRef: BindingRef): ExtensionFactory {
+export function buildLoopbackBridgeExtension(bindingRef: BindingRef, control: BridgeControl): ExtensionFactory {
 	let registeredToken: string | undefined;
 	const serverConfig = (): McpServerConfig | undefined => {
 		const binding = bindingRef.current;
@@ -126,11 +140,25 @@ export function buildLoopbackBridgeExtension(bindingRef: BindingRef): ExtensionF
 			registeredToken = bindingRef.current?.token;
 		};
 		pi.on("session_start", () => register());
-		pi.on("turn_start", () => {
-			if (bindingRef.current && bindingRef.current.token !== registeredToken) {
-				register();
+		// A re-register with a changed config makes the MCP extension hide the
+		// bridge tools synchronously and reconnect asynchronously. Inside a run
+		// that poisons the turn: the run's context snapshot and tool declarations
+		// are already built from the pre-drop registry, so the model calls tools
+		// that are no longer executable ("Tool mcp__owui__... not found"). The
+		// binding only changes between runs, so prompt() applies it here.
+		control.sync = async () => {
+			const binding = bindingRef.current;
+			if (!binding || binding.token === registeredToken) return;
+			register();
+			// registerMcpServer hides the old connection's tools synchronously;
+			// hold the run until the reconnect has re-registered the served ones.
+			const deadline = Date.now() + BRIDGE_RECONNECT_WAIT_MS;
+			while (Date.now() < deadline) {
+				const tools = pi.getAllTools().filter((tool) => tool.name.startsWith(BRIDGE_TOOL_PREFIX));
+				if (tools.some((tool) => tool.exposure !== "hidden")) return;
+				await new Promise((resolve) => setTimeout(resolve, 25));
 			}
-		});
+		};
 	};
 }
 
@@ -157,6 +185,8 @@ interface ChatEntry {
 	gate: InteractionGate;
 	/** The latest loopback binding the backend minted for this chat. */
 	bindingRef: BindingRef;
+	/** The bridge handle; its sync is wired when the bridge extension binds. */
+	bridge: BridgeControl;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
 	abortRequested: boolean;
 	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
@@ -352,7 +382,8 @@ export class SessionRegistry {
 
 		const gate: InteractionGate = { ask: false, waiter: null, pump: null };
 		const bindingRef: BindingRef = { current: binding };
-		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef);
+		const bridge: BridgeControl = { sync: async () => undefined };
+		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge);
 		// Loads the factories (bridge registrar, MCP connector, codemode, tool
 		// search) and runs extensionsOverride, which splices the gate in.
 		await resourceLoader.reload();
@@ -389,6 +420,7 @@ export class SessionRegistry {
 			resumed: Boolean(latest),
 			gate,
 			bindingRef,
+			bridge,
 			abortRequested: false,
 			lastUsedAt: now,
 			lastUsedSeq: this.touch(),
@@ -406,11 +438,16 @@ export class SessionRegistry {
 	 * server through pi's MCP machinery (PR4). No skills, themes, prompts, or
 	 * context files: the chat's prompt head is the whole resource surface.
 	 */
-	private bridgeResourceLoader(system: string | undefined, gate: InteractionGate, bindingRef: BindingRef) {
+	private bridgeResourceLoader(
+		system: string | undefined,
+		gate: InteractionGate,
+		bindingRef: BindingRef,
+		bridge: BridgeControl,
+	) {
 		const extensionFactories: InlineExtension[] = [];
 		if (bindingRef.current) {
 			extensionFactories.push(
-				buildLoopbackBridgeExtension(bindingRef),
+				buildLoopbackBridgeExtension(bindingRef, bridge),
 				createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }) }),
 				createCodemodeExtension({ mode: "on" }),
 				createToolSearchExtension(),
@@ -531,6 +568,9 @@ export class SessionRegistry {
 		entry.lastUsedSeq = this.touch();
 		let lastStopReason: string | undefined;
 		try {
+			// Apply the turn's binding outside the run: a mid-run re-register
+			// hides the bridge tools while the run already holds its snapshot.
+			await entry.bridge.sync();
 			const unsubscribe = entry.session.subscribe((event) => {
 				if (event.type === "message_end" && event.message?.role === "assistant") {
 					lastStopReason = String((event.message as { stopReason?: string }).stopReason);
