@@ -109,4 +109,82 @@ describe("SessionRegistry", () => {
 		await bed.registry.abort("chat-busy");
 		await running;
 	});
+
+	it("gates the custom tool call in ask mode; the approved verdict resumes the run", async () => {
+		await bed.registry.get("chat-gate-approve");
+		const events: { event: string; data: Record<string, unknown> }[] = [];
+		const running = bed.registry.prompt(
+			"chat-gate-approve",
+			"TOOL_ECHO approve me",
+			(event) => events.push({ event: String((event as { type?: string }).type), data: event as Record<string, unknown> }),
+			{ toolApproval: "ask" },
+		);
+
+		await vi.waitFor(() => {
+			const interaction = events.find((e) => e.event === "owui_interaction");
+			expect(interaction).toBeDefined();
+			expect((interaction?.data["interaction"] as { id?: string; toolName?: string })?.id).toBe("call_fake_1");
+			expect((interaction?.data["interaction"] as { toolName?: string })?.toolName).toBe("echo");
+		});
+		// the run stays parked on the gate, still running
+		expect((await bed.registry.interact("chat-gate-approve", "wrong-id", "approve")) as boolean).toBe(false);
+
+		expect(bed.registry.interact("chat-gate-approve", "call_fake_1", "approve")).toBe(true);
+		const result = await running;
+		expect(result.reason).toBe("completed");
+		expect(result.assistantText).toContain("tool said: echo:fake-was-here:TOOL_ECHO approve me");
+		expect(events.some((e) => e.event === "tool_execution_end")).toBe(true);
+	});
+
+	it("gates the custom tool call in ask mode; the deny verdict blocks it", async () => {
+		await bed.registry.get("chat-gate-deny");
+		const events: { event: string }[] = [];
+		const running = bed.registry.prompt(
+			"chat-gate-deny",
+			"TOOL_ECHO deny me",
+			(event) => events.push({ event: String((event as { type?: string }).type) }),
+			{ toolApproval: "ask" },
+		);
+
+		await vi.waitFor(() => {
+			expect(events.some((e) => e.event === "owui_interaction")).toBe(true);
+		});
+		expect(bed.registry.interact("chat-gate-deny", "call_fake_1", "reject")).toBe(true);
+		const result = await running;
+		expect(result.reason).toBe("completed");
+		expect(result.assistantText).toContain("tool said: Tool call rejected by the user.");
+		// pi never executed the denied tool
+		expect(events.some((e) => e.event === "tool_execution_start")).toBe(true);
+	});
+
+	it("runs tool calls silently in full mode, the same as without the gate", async () => {
+		await bed.registry.get("chat-gate-full");
+		const events: { event: string }[] = [];
+		const result = await bed.registry.prompt(
+			"chat-gate-full",
+			"TOOL_ECHO full mode",
+			(event) => events.push({ event: String((event as { type?: string }).type) }),
+			{ toolApproval: "full" },
+		);
+		expect(events.some((e) => e.event === "owui_interaction")).toBe(false);
+		expect(result.assistantText).toContain("tool said: echo:fake-was-here:TOOL_ECHO full mode");
+	});
+
+	it("abort drops a pending gate instead of hanging the run", async () => {
+		await bed.registry.get("chat-gate-abort");
+		const events: { event: string }[] = [];
+		const running = bed.registry.prompt(
+			"chat-gate-abort",
+			"TOOL_ECHO aborted",
+			(event) => events.push({ event: String((event as { type?: string }).type) }),
+			{ toolApproval: "ask" },
+		);
+		await vi.waitFor(() => {
+			expect(events.some((e) => e.event === "owui_interaction")).toBe(true);
+		});
+
+		expect(await bed.registry.abort("chat-gate-abort")).toBe(true);
+		const result = await running;
+		expect(result.reason).toBe("aborted");
+	});
 });

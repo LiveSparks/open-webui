@@ -2986,15 +2986,26 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         )
 
     if pending_assistant_message is not None:
-        if await resume_tool_calls(request, form_data, user, model, metadata, pending_assistant_message):
-            return form_data, metadata, events, True
-        assistant_message = dict(pending_assistant_message)
-        if assistant_message.get('model') != model['id'] and isinstance(assistant_message.get('output'), list):
-            assistant_message['output'] = strip_reasoning_details(assistant_message['output'])
-        form_data['messages'].extend(
-            process_messages_with_output([assistant_message], reasoning_format=get_reasoning_format(model))
-        )
-        await convert_url_images_to_base64(form_data, user=user)
+        from open_webui.routers.agent import is_agent_model
+
+        if is_agent_model(model.get('id', '')):
+            # The agent loop (PR3): approved tool calls execute inside the
+            # sidecar's interaction gate, never the Python tool registry (the
+            # sidecar side is where the call actually lives). Fall through to
+            # generation: the agent dispatch carries the browser's decision
+            # (approve or deny) to the gate, and the run's own bridge stream
+            # resumes the message.
+            pass
+        else:
+            if await resume_tool_calls(request, form_data, user, model, metadata, pending_assistant_message):
+                return form_data, metadata, events, True
+            assistant_message = dict(pending_assistant_message)
+            if assistant_message.get('model') != model['id'] and isinstance(assistant_message.get('output'), list):
+                assistant_message['output'] = strip_reasoning_details(assistant_message['output'])
+            form_data['messages'].extend(
+                process_messages_with_output([assistant_message], reasoning_format=get_reasoning_format(model))
+            )
+            await convert_url_images_to_base64(form_data, user=user)
 
     if ENABLE_FUNCTIONS:
         try:
@@ -6464,6 +6475,14 @@ async def streaming_chat_response_handler(response, ctx):
 
 
 async def process_chat_response(response, ctx):
+    # Agent loop (PR3): the bridge translated the sidecar's pi SSE into the
+    # Responses stream; persistence, outlet, and background tasks stay
+    # loop-owned in Python through the agent handler.
+    if isinstance(response, StreamingResponse) and response.headers.get('x-agent-loop') == 'pi':
+        from open_webui.routers.agent import agent_chat_response_handler
+
+        return await agent_chat_response_handler(response, ctx)
+
     # Non-streaming response
     if not isinstance(response, StreamingResponse):
         return await non_streaming_chat_response_handler(response, ctx)

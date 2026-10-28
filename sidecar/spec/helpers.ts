@@ -132,7 +132,7 @@ export interface TestBed {
 	cleanup: () => Promise<void>;
 }
 
-export async function buildTestBed(name: string): Promise<TestBed> {
+export async function buildTestBed(name: string, options?: { cap?: number; ttlMs?: number }): Promise<TestBed> {
 	const fake = await startFakeProvider();
 	const base = join(tmpdir(), `sidecar-spec-${process.pid}-${name.replace(/[^a-z0-9-]/gi, "")}`);
 	const agentDir = join(base, "agent");
@@ -174,7 +174,13 @@ export async function buildTestBed(name: string): Promise<TestBed> {
 		authPath: join(agentDir, "auth.json"),
 		modelsPath: join(agentDir, "models.json"),
 	});
-	const registry = new SessionRegistry(config, modelRuntime, resolveModel(config, modelRuntime));
+	const registry = new SessionRegistry(
+		config,
+		modelRuntime,
+		resolveModel(config, modelRuntime),
+		options?.ttlMs,
+		options?.cap,
+	);
 	return {
 		fake,
 		config,
