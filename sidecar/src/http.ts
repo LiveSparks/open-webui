@@ -1,6 +1,8 @@
 import http from "node:http";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { SidecarConfig } from "./config.ts";
 import { ConfigError, parseLoopbackBinding, validateChatId } from "./config.ts";
+import { buildProviderCatalog, parseTurnEnvelope } from "./providers.ts";
 import type { SessionRegistry } from "./session.ts";
 import { SessionConflictError, UnknownChatError, type InteractionAction } from "./session.ts";
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -14,6 +16,8 @@ export interface HttpSurface {
 interface HttpDeps {
 	config: SidecarConfig;
 	registry: SessionRegistry;
+	/** The runtime the catalog route reads; undefined only in stale callers. */
+	modelRuntime?: ModelRuntime;
 }
 
 function writeJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -73,7 +77,7 @@ function requireString(body: Record<string, unknown>, field: string): string {
  * Python job and must not happen here.
  */
 export function createHttpSurface(deps: HttpDeps): HttpSurface {
-	const { config, registry } = deps;
+	const { config, registry, modelRuntime } = deps;
 
 	const server = http.createServer((req, res) => {
 		void handle(req, res).catch((error: unknown) => {
@@ -97,6 +101,18 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 
 		if (req.method === "GET" && url.pathname === "/health") {
 			return handleHealth(req, res);
+		}
+
+		// The provider catalog the OWUI backend consumes per turn (PR6): the
+		// providers pi knows, their base URLs, and each model's supported
+		// thinking ladder. Public info, no credentials, same as /health.
+		if (req.method === "GET" && url.pathname === "/catalog") {
+			if (!modelRuntime) {
+				writeJson(res, 501, { ok: false, error: "catalog requires a model runtime" });
+				return;
+			}
+			writeJson(res, 200, { ok: true, ...buildProviderCatalog(modelRuntime) });
+			return;
 		}
 
 		if (req.method === "POST" && url.pathname === "/sessions") {
@@ -205,6 +221,8 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 		// The approval gate for this run (issue 6): 'ask' pauses every tool
 		// call on the browser's decision, 'full' runs them silently.
 		const toolApproval = body["toolApproval"] === "ask" ? "ask" : "full";
+		// The turn's resolved model/key/header envelope (PR6, issues 22/23).
+		const turn = parseTurnEnvelope(body["turn"]);
 
 		writeSseHead(res);
 		const onEvent = (event: unknown) => {
@@ -221,7 +239,7 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 
 		let result;
 		try {
-			result = await registry.prompt(chatId, message, onEvent, { toolApproval });
+			result = await registry.prompt(chatId, message, onEvent, { toolApproval, turn });
 		} catch (error) {
 			if (error instanceof SessionConflictError) {
 				writeSseFrame(res, "error", { ok: false, error: error.message });

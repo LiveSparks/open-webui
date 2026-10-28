@@ -158,12 +158,13 @@ async def stream_sidecar_events(
     chat_id: str,
     message: str,
     tool_approval: str = 'full',
+    turn: dict | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Yield `(event, data)` frames from the sidecar prompt SSE stream."""
     async with client.stream(
         'POST',
         f'/sessions/{chat_id}/prompt',
-        json={'message': message, 'toolApproval': tool_approval},
+        json={'message': message, 'toolApproval': tool_approval, **({'turn': turn} if turn else {})},
         timeout=None,
     ) as response:
         if response.status_code >= 400:
@@ -567,10 +568,19 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
         # runs tool calls silently (trunk's ungated mode).
         tool_approval = _delivery_mode(metadata)
 
+        # The per-turn handoff (PR6, issues 22/23/20): model, provider
+        # expression, header map, and params resolve fresh every message and
+        # ride the prompt; the key never crosses here — the sidecar fetches
+        # it at the moment of use through the binding-authenticated key
+        # route.
+        from open_webui.routers.agent_runtime import build_turn_envelope
+
+        turn = await build_turn_envelope(request, user, form_data, metadata)
+
         async def sse_stream() -> AsyncIterator[str]:
             translator = PiEventTranslator()
             try:
-                async for event, data in stream_sidecar_events(client, chat_id, prompt_text, tool_approval):
+                async for event, data in stream_sidecar_events(client, chat_id, prompt_text, tool_approval, turn):
                     async for line in translator.translate(event, data):
                         yield line
                     for line in translator.flush_lines():
