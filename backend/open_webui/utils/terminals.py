@@ -7,6 +7,8 @@ import ntpath
 import posixpath
 from urllib.parse import quote
 
+from fastapi import HTTPException
+
 from open_webui.env import ENABLE_TOOL_SERVERS
 from open_webui.utils.chat_id import is_saved_chat_id
 from open_webui.utils.skill_files import (
@@ -310,6 +312,61 @@ def format_terminal_skill_context(skill: dict, skill_id: str, tools_enabled: boo
         parts.append(skill['notice'])
     parts.append('</skill>')
     return '\n'.join(parts)
+
+
+async def resolve_turn_machine(request, user, metadata: dict, model_id: str | None = None) -> str | None:
+    """The machine id bound for this turn, or None when no machine applies
+    (the chat metadata's selection, else the model's pinned default; issue 8)."""
+    machine_id = (metadata or {}).get('terminal_id') or await pinned_model_terminal(request, model_id)
+    if not machine_id:
+        return None
+    await verify_selected_machine(request, user.id, machine_id)
+    return machine_id
+
+
+async def pinned_model_terminal(request, model_id: str | None) -> str | None:
+    """The terminal a model pins as its scoped default, from the assembled
+    model registry (a fresh DB read fills in for a request-less registry)."""
+    if not model_id:
+        return None
+    model = (getattr(request.app.state, 'MODELS', {}) or {}).get(model_id)
+    if model is None:
+        from open_webui.models.models import Models
+
+        model_row = await Models.get_model_by_id(model_id)
+        if model_row is None:
+            return None
+        model = {'info': model_row.model_dump()}
+    pinned = (
+        ((model or {}).get('info', {}) or {}).get('meta', {}).get('terminalId') if isinstance(model, dict) else None
+    )
+    return pinned.strip() if isinstance(pinned, str) and pinned.strip() else None
+
+
+async def verify_selected_machine(request, user_id: str, terminal_id: str, context: str = 'chat') -> dict:
+    """The admin-configured machine a binding points at, verified fresh.
+
+    Admin-configured machines only (phase 1 of the machine-binding decision);
+    a stale binding never executes on a different machine.
+    """
+    from open_webui.models.config import Config
+    from open_webui.models.groups import Groups
+    from open_webui.models.users import Users
+    from open_webui.utils.access_control import has_connection_access
+
+    connections = await Config.get('terminal_server.connections', []) or []
+    connection = next((item for item in connections if item.get('id') == terminal_id), None)
+    if not connection or not connection.get('enabled', True):
+        raise HTTPException(status_code=404, detail='The selected machine is gone.')
+    if not terminal_context_available(connection, context):
+        raise HTTPException(status_code=404, detail=f'The selected machine is not available for {context}s.')
+    user = await Users.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail='binding user no longer exists')
+    user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user.id, include_inherited=True)}
+    if not await has_connection_access(user, connection, user_group_ids):
+        raise HTTPException(status_code=403, detail='The selected machine is not accessible to this user.')
+    return connection
 
 
 def format_terminal_skill_manifest_entry(skill: dict) -> str:

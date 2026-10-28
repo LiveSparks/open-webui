@@ -24,6 +24,7 @@ import {
 import { Type } from "@earendil-works/pi-ai";
 import type { SidecarConfig } from "./config.ts";
 import { validateChatId, type LoopbackBinding } from "./config.ts";
+import { buildMachineTools, machineChatRoot } from "./machineTools.ts";
 
 /**
  * The bridge seam, proven end to end by the live lanes: a custom tool the chat
@@ -185,6 +186,8 @@ interface ChatEntry {
 	gate: InteractionGate;
 	/** The latest loopback binding the backend minted for this chat. */
 	bindingRef: BindingRef;
+	/** Whether the session was created with the machine-bound local tools (PR5). */
+	machineBound: boolean;
 	/** The bridge handle; its sync is wired when the bridge extension binds. */
 	bridge: BridgeControl;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
@@ -370,33 +373,45 @@ export class SessionRegistry {
 			existing.bindingRef.current = binding ?? existing.bindingRef.current;
 			existing.lastUsedAt = Date.now();
 			existing.lastUsedSeq = this.touch();
-			return existing;
+			if (Boolean(existing.bindingRef.current?.machine) !== existing.machineBound) {
+				// The machine selection changed presence between turns: pi's custom
+				// tool list is fixed per session, so rebuild from the JSONL (the
+				// proven resume path). Not an eviction; every turn stays hosted.
+				existing.session.dispose();
+				this.chats.delete(chatId);
+			} else {
+				return existing;
+			}
 		}
 		this.enforceCap(1);
 
 		const sessionDir = this.chatDir(chatId);
 		const latest = this.latestSessionFile(sessionDir);
-		const sessionManager = latest
-			? SessionManager.open(latest, sessionDir)
-			: SessionManager.create(this.config.cwd, sessionDir);
-
 		const gate: InteractionGate = { ask: false, waiter: null, pump: null };
 		const bindingRef: BindingRef = { current: binding };
+		// Machine-bound sessions (PR5, issue 8): the built-ins rebind as custom
+		// tools to the chat's selected machine, and paths resolve against the
+		// per-chat root the machine-side session keeps its cwd under.
+		const machineBound = Boolean(bindingRef.current?.machine);
+		const sessionCwd = machineBound ? machineChatRoot(chatId) : this.config.cwd;
 		const bridge: BridgeControl = { sync: async () => undefined };
 		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge);
 		// Loads the factories (bridge registrar, MCP connector, codemode, tool
 		// search) and runs extensionsOverride, which splices the gate in.
 		await resourceLoader.reload();
 		const { session } = await createAgentSession({
-			cwd: this.config.cwd,
+			cwd: sessionCwd,
 			modelRuntime: this.modelRuntime,
 			model: this.model,
 			thinkingLevel: "off",
-			// Built-ins stay off: the bridge carries OWUI's own tool surface (PR4).
-			// The echo tool stays active: it is the bridge seam under test.
+			// Built-ins stay off: the bridge carries OWUI's own tool surface (PR4)
+			// and a selected machine carries the rebound built-ins (PR5). The echo
+			// tool stays active: it is the bridge seam under test.
 			noTools: "builtin",
-			customTools: [echoTool],
-			sessionManager,
+			customTools: machineBound ? [echoTool, ...buildMachineTools(chatId, bindingRef)] : [echoTool],
+			sessionManager: latest
+				? SessionManager.open(latest, sessionDir, machineBound ? sessionCwd : undefined)
+				: SessionManager.create(sessionCwd, sessionDir),
 			settingsManager: SettingsManager.inMemory({
 				compaction: { enabled: false },
 				retry: { enabled: false },
@@ -420,6 +435,7 @@ export class SessionRegistry {
 			resumed: Boolean(latest),
 			gate,
 			bindingRef,
+			machineBound,
 			bridge,
 			abortRequested: false,
 			lastUsedAt: now,

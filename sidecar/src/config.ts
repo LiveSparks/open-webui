@@ -80,12 +80,21 @@ export function validateChatId(chatId: string): string {
 	return chatId;
 }
 
+/** The machine loopback executor binding the backend mints per turn (PR5). */
+export interface MachineBinding {
+	url: string;
+	token: string;
+}
+
 /** The loopback tool bridge binding the backend mints per turn (PR4). */
 export interface LoopbackBinding {
 	url: string;
 	token: string;
 	/** Tool names the backend says this turn selected; they ride direct. */
 	direct?: string[];
+	/** The machine executor (PR5): present only when a machine is selected, and
+	 * always the OWUI backend's own loopback surface, never the machine's. */
+	machine?: MachineBinding;
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -102,28 +111,50 @@ export function parseLoopbackBinding(body: Record<string, unknown>): LoopbackBin
 		throw new ConfigError('body field "binding" must be an object');
 	}
 	const record = raw as Record<string, unknown>;
-	const url = record["url"];
-	const token = record["token"];
-	if (typeof url !== "string" || url === "" || typeof token !== "string" || token === "") {
-		throw new ConfigError('binding must carry non-empty string fields "url" and "token"');
-	}
-	let parsed: URL;
-	try {
-		parsed = new URL(url);
-	} catch {
-		throw new ConfigError(`binding url is not a URL: "${url}"`);
-	}
-	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		throw new ConfigError(`binding url must be http(s), got ${parsed.protocol}`);
-	}
-	if (!LOOPBACK_HOSTS.has(parsed.hostname)) {
-		throw new ConfigError(`binding url must be loopback, got "${parsed.hostname}"`);
-	}
+	const url = parseLoopbackUrl(record["url"], "binding.url");
+	const token = parseToken(record["token"], "binding.token");
 	const direct = record["direct"];
 	if (direct !== undefined && (!Array.isArray(direct) || direct.some((name) => typeof name !== "string"))) {
 		throw new ConfigError('binding field "direct" must be an array of tool names');
 	}
-	return { url, token, ...(Array.isArray(direct) ? { direct: direct as string[] } : {}) };
+	const machineRaw = record["machine"];
+	let machine: MachineBinding | undefined;
+	if (machineRaw !== undefined && machineRaw !== null) {
+		if (typeof machineRaw !== "object" || Array.isArray(machineRaw)) {
+			throw new ConfigError('binding field "machine" must be an object');
+		}
+		machine = {
+			url: parseLoopbackUrl((machineRaw as Record<string, unknown>)["url"], "binding.machine.url"),
+			token: parseToken((machineRaw as Record<string, unknown>)["token"], "binding.machine.token"),
+		};
+	}
+	return { url, token, ...(Array.isArray(direct) ? { direct: direct as string[] } : {}), ...(machine ? { machine } : {}) };
+}
+
+function parseToken(value: unknown, field: string): string {
+	if (typeof value !== "string" || value === "") {
+		throw new ConfigError(`${field} must be a non-empty string`);
+	}
+	return value;
+}
+
+function parseLoopbackUrl(value: unknown, field: string): string {
+	if (typeof value !== "string" || value === "") {
+		throw new ConfigError(`${field} must be a non-empty string`);
+	}
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		throw new ConfigError(`${field} is not a URL: "${value}"`);
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+		throw new ConfigError(`${field} must be http(s), got ${parsed.protocol}`);
+	}
+	if (!LOOPBACK_HOSTS.has(parsed.hostname)) {
+		throw new ConfigError(`${field} must be loopback, got "${parsed.hostname}"`);
+	}
+	return value;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig {

@@ -948,8 +948,12 @@ async def _verify_version_dependencies(request, form, user, db):
             if not function or not function.is_active:
                 raise HTTPException(400, f'A referenced function is unavailable: {function_id}')
     terminal_id = getattr(form.meta, 'terminalId', None)
-    if terminal_id and terminal_id not in {t['id'] for t in await list_terminal_servers(request, user=user)}:
+    listed_terminals = await list_terminal_servers(request, user=user)
+    if terminal_id and terminal_id not in {t['id'] for t in listed_terminals}:
         raise HTTPException(400, 'The referenced terminal is missing or inaccessible.')
+    pinned = next((t for t in listed_terminals if t['id'] == terminal_id), None)
+    if pinned and pinned.get('contexts', {}).get('chat') is False:
+        raise HTTPException(400, 'The pinned terminal is not available for chats.')
 
 
 class ModelVersionForm(BaseModel):
