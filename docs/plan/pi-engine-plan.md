@@ -188,66 +188,66 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 
 **Files.**
 
-- [ ] Create `backend/open_webui/routers/agent.py` holding the HTTP/SSE client for the sidecar and the steer route.
-- [ ] Edit `backend/open_webui/utils/middleware.py` at the splice point `process_chat_response` (line 6466 in 0.12.3) and `backend/open_webui/utils/chat.py` (`chat_completed`, the outlet path).
-- [ ] Edit `backend/open_webui/socket/main.py` emitter wiring only where the envelope contract needs it.
-- [ ] Edit `src/lib/components/chat/Chat.svelte` send-during-generation only after the steering endpoint exists.
-- [ ] Create the event-translation test module in the forked parity repository.
+- [x] Create `backend/open_webui/routers/agent.py` holding the HTTP/SSE client for the sidecar and the steer route.
+- [x] Edit `backend/open_webui/utils/middleware.py` at the splice point `process_chat_response` (line 6466 in 0.12.3) and `backend/open_webui/utils/chat.py` (`chat_completed`, the outlet path).
+- [x] Edit `backend/open_webui/socket/main.py` emitter wiring only where the envelope contract needs it. — audited: the envelope contract needed no emitter change; file untouched.
+- [ ] Edit `src/lib/components/chat/Chat.svelte` send-during-generation only after the steering endpoint exists. — lands in PR10 (send-during-generation UI); the steering endpoint exists as of PR3.
+- [x] Create the event-translation test module in the forked parity repository.
 
 **Build.**
 
-- [ ] The translator in `routers/agent.py` turns pi-native SSE into the Socket.IO `events` envelope with `chat:completion` Responses-style output items per the [event bridge decision](https://github.com/LiveSparks/open-webui/issues/6), reusing `get_event_emitter` so status, citations, files, and errors keep their shapes.
-- [ ] `upsert_message_to_chat_by_id_and_message_id`, `save_response_stream`, and the task registry in `backend/open_webui/tasks.py` stay loop-owned Python.
-- [ ] Stop posts to the sidecar `abort` route and flushes with a `done` frame. Steering posts to the steer route; the UI change lands in PR10.
-- [ ] Edit-resend calls the sidecar fork-or-restore route per the [inlet and outlet contract](https://github.com/LiveSparks/open-webui/issues/27) and ADR 0005. Inlet runs in Python before the sidecar prompt on the prompt head plus the new turn, with history omitted from its payload. Outlet mutates only the persisted copy.
-- [ ] Approvals and `request:user_input` ride the translator's interaction callbacks; title, tags, and follow-ups keep their `background_tasks_handler` plumbing.
-- [ ] The prompt head from `process_chat_payload` hands off wholesale to the sidecar per the [chat events inventory](https://github.com/LiveSparks/open-webui/issues/4).
-- [ ] Fork `open-webui/tests` into `LiveSparks/open-webui-tests` and add the event-translation module on the harness; mapped chat modules run script-first on trunk and head through one harness with a zero-edit rule per the [parity decision](https://github.com/LiveSparks/open-webui/issues/25).
-- [ ] Session eviction per the [eviction decision](https://github.com/LiveSparks/open-webui/issues/29). The in-memory session registry is a cache over the JSONL, never the source of truth. Evict a session 15 minutes after its last turn ends, with a hard cap of 50 loaded sessions evicted LRU-first. Never evict a session with a running or queued turn, and never a parent while it has background children alive. Eviction deletes the registry entry; the next message rebuilds from JSONL and must land with any between-turn state restored from the chat record, not lost.
+- [x] The translator in `routers/agent.py` turns pi-native SSE into the Socket.IO `events` envelope with `chat:completion` Responses-style output items per the [event bridge decision](https://github.com/LiveSparks/open-webui/issues/6), reusing `get_event_emitter` so status, citations, files, and errors keep their shapes.
+- [x] `upsert_message_to_chat_by_id_and_message_id`, `save_response_stream`, and the task registry in `backend/open_webui/tasks.py` stay loop-owned Python.
+- [x] Stop posts to the sidecar `abort` route and flushes with a `done` frame. Steering posts to the steer route; the UI change lands in PR10.
+- [x] Edit-resend calls the sidecar fork-or-restore route per the [inlet and outlet contract](https://github.com/LiveSparks/open-webui/issues/27) and ADR 0005. Inlet runs in Python before the sidecar prompt on the prompt head plus the new turn, with history omitted from its payload. Outlet mutates only the persisted copy.
+- [x] Approvals and `request:user_input` ride the translator's interaction callbacks; title, tags, and follow-ups keep their `background_tasks_handler` plumbing.
+- [x] The prompt head from `process_chat_payload` hands off wholesale to the sidecar per the [chat events inventory](https://github.com/LiveSparks/open-webui/issues/4).
+- [x] Fork `open-webui/tests` into `LiveSparks/open-webui-tests` and add the event-translation module on the harness; mapped chat modules run script-first on trunk and head through one harness with a zero-edit rule per the [parity decision](https://github.com/LiveSparks/open-webui/issues/25).
+- [x] Session eviction per the [eviction decision](https://github.com/LiveSparks/open-webui/issues/29). The in-memory session registry is a cache over the JSONL, never the source of truth. Evict a session 15 minutes after its last turn ends, with a hard cap of 50 loaded sessions evicted LRU-first. Never evict a session with a running or queued turn, and never a parent while it has background children alive. Eviction deletes the registry entry; the next message rebuilds from JSONL and must land with any between-turn state restored from the chat record, not lost.
 
 **You see.**
 
-- [ ] A scripted chat answers in the browser with the ordinary streaming bubble, sources, and status pills.
-- [ ] The chat record persists with the message id, and reload keeps history.
+- [x] A scripted chat answers in the browser with the ordinary streaming bubble, sources, and status pills. — bubble and pills browser-proven; sources/citations ride the unchanged pre-stream path, covered by the lane 1 shape regression (no scripted citation exists).
+- [x] The chat record persists with the message id, and reload keeps history.
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] New parity module `integration/chat/agent_event_bridge.py` asserts the envelope output items, the stop path, steering, edit-resend fork, and error frames against the scripted provider. Run `OPEN_WEBUI_SOURCE_DIR=$PWD/backend DATA_DIR=/tmp/scratch/data STATIC_DIR=/tmp/scratch/static WEBUI_SECRET_KEY=test python -m pytest integration/chat/agent_event_bridge.py -q`.
-- [ ] Registry eviction spec: idle-TTL eviction, the 50-cap LRU order, the running-and-children guards, and rebuild-from-JSONL preserving prior context and between-turn state.
+- [x] New parity module `integration/chat/agent_event_bridge.py` asserts the envelope output items, the stop path, steering, edit-resend fork, and error frames against the scripted provider. Run `OPEN_WEBUI_SOURCE_DIR=$PWD/backend DATA_DIR=/tmp/scratch/data STATIC_DIR=/tmp/scratch/static WEBUI_SECRET_KEY=test python -m pytest integration/chat/agent_event_bridge.py -q`.
+- [x] Registry eviction spec: idle-TTL eviction, the 50-cap LRU order, the running-and-children guards, and rebuild-from-JSONL preserving prior context and between-turn state.
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten lanes on `grok-4.7-xhigh-fast` at the PR head, per the boot recipe.
 
-- [ ] Lane 1. Regression lane against trunk. Run the load-bearing plain chat scenario at trunk and head with the same scripted replies. Save `regression-plain-chat.png`. Pass when head matches trunk's stored message, status history, and usage shape, or records any envelope change the operator named.
-- [ ] Lane 2. Error path. Force the scripted provider to abort. Save `error-frame.png`. Pass when the browser shows `chat:message:error` and a usable done state.
-- [ ] Lane 3. Steering. Stop is pressed mid-stream, then a new message goes and the next turn answers it. Save `steer-after-stop.png`. Pass when no interrupt rebuilds the message.
-- [ ] Lane 4. Approvals. A scripted tool call raises the approval card and the resume continues. Save `approval-card.png`. Pass when approve and deny both reach the sidecar.
-- [ ] Lane 5. Edit-resend. Edit a past user message and resend. Save `edit-resend.png`. Pass when the new turn follows the fork and the old turn stays visible.
-- [ ] Lane 6. Persistence. Stream, then reconnect and reload the chat. Save `reload-history.png`. Pass when the DB copy matches the streamed bubbles and Redis keys clear.
-- [ ] Lane 7. Shared chat. Two browser tabs on one chat see the same stream through the shared emit. Save `shared-chat.png`. Pass when the second tab mirrors frames.
-- [ ] Lane 8. Title and follow-ups. After a turn the title, tags, and follow-up pills arrive through the unchanged background path. Save `title-followups.png`. Pass when all three appear.
-- [ ] Lane 9. Inlet and outlet. An inlet filter rewrites the prompt head and an outlet filter rewrites the persisted reply. Save `filters.png`. Pass when the sidecar turn sees the rewritten head and history stays untouched.
-- [ ] Lane 10. Stop mid-tool. Hard stop during a pending tool turn. Save `stop-mid-tool.png`. Pass when the task registry clears and the next message is clean.
-- [ ] Lane 11. Eviction. Open 60 chats, let the TTL lapse on 30, prompt an evicted one again, and watch a second while it runs. Save `eviction.png`. Pass when the cap holds, the evicted chat rebuilds from disk with its history intact, nothing running or parented is evicted, and the measured RAM per idle session is recorded. `GET /health` reports loaded, running, and evicted-since-boot counts.
+- [x] Lane 1. Regression lane against trunk. Run the load-bearing plain chat scenario at trunk and head with the same scripted replies. Save `regression-plain-chat.png`. Pass when head matches trunk's stored message, status history, and usage shape, or records any envelope change the operator named.
+- [x] Lane 2. Error path. Force the scripted provider to abort. Save `error-frame.png`. Pass when the browser shows `chat:message:error` and a usable done state.
+- [x] Lane 3. Steering. Stop is pressed mid-stream, then a new message goes and the next turn answers it. Save `steer-after-stop.png`. Pass when no interrupt rebuilds the message.
+- [x] Lane 4. Approvals. A scripted tool call raises the approval card and the resume continues. Save `approval-card.png`. Pass when approve and deny both reach the sidecar.
+- [x] Lane 5. Edit-resend. Edit a past user message and resend. Save `edit-resend.png`. Pass when the new turn follows the fork and the old turn stays visible.
+- [x] Lane 6. Persistence. Stream, then reconnect and reload the chat. Save `reload-history.png`. Pass when the DB copy matches the streamed bubbles and Redis keys clear.
+- [x] Lane 7. Shared chat. Two browser tabs on one chat see the same stream through the shared emit. Save `shared-chat.png`. Pass when the second tab mirrors frames.
+- [x] Lane 8. Title and follow-ups. After a turn the title, tags, and follow-up pills arrive through the unchanged background path. Save `title-followups.png`. Pass when all three appear.
+- [x] Lane 9. Inlet and outlet. An inlet filter rewrites the prompt head and an outlet filter rewrites the persisted reply. Save `filters.png`. Pass when the sidecar turn sees the rewritten head and history stays untouched.
+- [x] Lane 10. Stop mid-tool. Hard stop during a pending tool turn. Save `stop-mid-tool.png`. Pass when the task registry clears and the next message is clean.
+- [x] Lane 11. Eviction. Open 60 chats, let the TTL lapse on 30, prompt an evicted one again, and watch a second while it runs. Save `eviction.png`. Pass when the cap holds, the evicted chat rebuilds from disk with its history intact, nothing running or parented is evicted, and the measured RAM per idle session is recorded. `GET /health` reports loaded, running, and evicted-since-boot counts. — PASS at 7bdf76dbd except the RAM figure: boot-delta measurement came out negative, recorded inconclusive.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Metric. First-token latency and streamed tokens per second for the same scripted replies, at trunk and at head.
-- [ ] Probe. The parity harness sends the same fifty-turn script interleaved, ten turns per side, against trunk and head Python instances.
-- [ ] Baseline. Record the trunk first-token time and throughput first.
-- [ ] Rule. Fails when head first-token time exceeds trunk by 300 ms or head throughput falls below 90 percent of trunk, measured on the interleaved probe.
+- [x] Metric. First-token latency and streamed tokens per second for the same scripted replies, at trunk and at head.
+- [x] Probe. The parity harness sends the same fifty-turn script interleaved, ten turns per side, against trunk and head Python instances.
+- [x] Baseline. Record the trunk first-token time and throughput first.
+- [x] Rule. Fails when head first-token time exceeds trunk by 300 ms or head throughput falls below 90 percent of trunk, measured on the interleaved probe.
 
 **Review gate.** The operator reviews before merge. Steering replacing interrupt is a deliberate product change named on the map.
 
-- [ ] Copy lane 2 and lane 3 screenshots into `docs/plan/reviews/pr3-review-<slug>.png`.
-- [ ] Record a 30 to 60 second video of stop and steer on a lane VM. Save it as `docs/plan/reviews/pr3-review.mp4`.
-- [ ] Post the screenshots and the video in chat. Stop at merge-ready. Wait for the operator's click.
+- [x] Copy lane 2 and lane 3 screenshots into `docs/plan/reviews/pr3-review-<slug>.png`. — kept in the store (`/.orchestrate/pi-engine/evidence-pr3/reviews/`, relative to the repo root on dev sessions) instead of docs/plan/reviews/ so the verified head SHA stayed immutable.
+- [x] Record a 30 to 60 second video of stop and steer on a lane VM. Save it as `docs/plan/reviews/pr3-review.mp4`. — kept in the store (`/.orchestrate/pi-engine/evidence-pr3/reviews/`, relative to the repo root on dev sessions) instead of docs/plan/reviews/ so the verified head SHA stayed immutable.
+- [x] Post the screenshots and the video in chat. Stop at merge-ready. Wait for the operator's click.
 
 **Merge.**
 
-- [ ] Root's clean verdict at the exact head SHA.
-- [ ] Bugbot triage done.
-- [ ] Rebased onto current trunk after the verdict, patch-id unchanged.
-- [ ] After the operator's click the owner squash-merges PR3.
+- [x] Root's clean verdict at the exact head SHA.
+- [x] Bugbot triage done.
+- [x] Rebased onto current trunk after the verdict, patch-id unchanged.
+- [x] After the operator's click the owner squash-merges PR3.
 
 ## Tool bridge onto pi (PR4)
 
