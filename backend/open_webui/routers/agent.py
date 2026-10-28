@@ -507,13 +507,31 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
             # stream; this request posts to the steer route and completes.
             # The send-during-generation UI change lands in PR10. Checked
             # before the fork decision: a send during a run never rewinds.
-            disposition = await steer_session(client, chat_id, prompt_text)
-            log.info('agent bridge: steered chat %s (%s)', chat_id, disposition)
-            return StreamingResponse(
-                _steer_acknowledgement(),
-                media_type='text/event-stream',
-                headers={'x-agent-loop': 'pi', 'x-agent-steer': 'true'},
-            )
+            steered = False
+            try:
+                disposition = await steer_session(client, chat_id, prompt_text)
+                steered = True
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code != 409:
+                    raise
+                # Race (issue 32): the run ended between the running check
+                # and the steer post, so the sidecar steer route answers 409
+                # and an unhandled post would fail a send whose message is
+                # already persisted. Re-read the session once: a send after
+                # run-end is just a new turn, so fall through to the prompt
+                # path below with the fresh state; a session running again
+                # gets one steer retry.
+                session_info = await ensure_session(client, chat_id, head or None)
+                if session_info.get('running'):
+                    disposition = await steer_session(client, chat_id, prompt_text)
+                    steered = True
+            if steered:
+                log.info('agent bridge: steered chat %s (%s)', chat_id, disposition)
+                return StreamingResponse(
+                    _steer_acknowledgement(),
+                    media_type='text/event-stream',
+                    headers={'x-agent-loop': 'pi', 'x-agent-steer': 'true'},
+                )
 
         if not ends_with_assistant and keep_turns < session_info.get('userTurns', 0):
             # Edit-resend or regeneration: history rewound, fork-or-restore
