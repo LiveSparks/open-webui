@@ -80,6 +80,52 @@ export function validateChatId(chatId: string): string {
 	return chatId;
 }
 
+/** The loopback tool bridge binding the backend mints per turn (PR4). */
+export interface LoopbackBinding {
+	url: string;
+	token: string;
+	/** Tool names the backend says this turn selected; they ride direct. */
+	direct?: string[];
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+/**
+ * Extract the optional `binding` from a session-create body. The bridge URL
+ * must point at the loopback interface: the sidecar holds a signed token, not
+ * an identity, and must never be pointed at a foreign host with it.
+ */
+export function parseLoopbackBinding(body: Record<string, unknown>): LoopbackBinding | undefined {
+	const raw = body["binding"];
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "object" || Array.isArray(raw)) {
+		throw new ConfigError('body field "binding" must be an object');
+	}
+	const record = raw as Record<string, unknown>;
+	const url = record["url"];
+	const token = record["token"];
+	if (typeof url !== "string" || url === "" || typeof token !== "string" || token === "") {
+		throw new ConfigError('binding must carry non-empty string fields "url" and "token"');
+	}
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		throw new ConfigError(`binding url is not a URL: "${url}"`);
+	}
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+		throw new ConfigError(`binding url must be http(s), got ${parsed.protocol}`);
+	}
+	if (!LOOPBACK_HOSTS.has(parsed.hostname)) {
+		throw new ConfigError(`binding url must be loopback, got "${parsed.hostname}"`);
+	}
+	const direct = record["direct"];
+	if (direct !== undefined && (!Array.isArray(direct) || direct.some((name) => typeof name !== "string"))) {
+		throw new ConfigError('binding field "direct" must be an array of tool names');
+	}
+	return { url, token, ...(Array.isArray(direct) ? { direct: direct as string[] } : {}) };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): SidecarConfig {
 	const missing: string[] = [];
 	for (const name of ["AGENT_SIDECAR_PORT", "AGENT_SIDECAR_AGENT_DIR", "AGENT_SIDECAR_MODEL", "AGENT_SESSIONS"]) {

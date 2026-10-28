@@ -149,6 +149,7 @@ from open_webui.models.messages import Messages
 from open_webui.models.models import Models, normalize_model_tags
 from open_webui.models.groups import Groups, resolve_group_default_models
 from open_webui.models.users import Users
+from open_webui.loopback_mcp import router as loopback_mcp_router
 from open_webui.routers import (
     apps,
     analytics,
@@ -875,6 +876,10 @@ app.mount('/ws', socket_app)
 
 app.include_router(ollama.router, prefix='/ollama', tags=['ollama'])
 app.include_router(openai.router, prefix='/openai', tags=['openai'])
+
+# Loopback MCP server (PR4): the sidecar's tool bridge dials this with the
+# session binding; auth is the signed token, not the cookie middleware.
+app.include_router(loopback_mcp_router, prefix='/loopback/mcp', tags=['loopback'])
 
 
 app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])

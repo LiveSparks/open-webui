@@ -6,10 +6,16 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import {
 	type AgentSession,
 	createAgentSession,
-	createExtensionRuntime,
+	createCodemodeExtension,
+	createMcpExtension,
 	createSyntheticSourceInfo,
+	createToolSearchExtension,
+	DefaultResourceLoader,
 	defineTool,
 	type Extension,
+	type ExtensionFactory,
+	type InlineExtension,
+	type McpServerConfig,
 	type ModelRuntime,
 	SessionManager,
 	SettingsManager,
@@ -17,7 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import type { SidecarConfig } from "./config.ts";
-import { validateChatId } from "./config.ts";
+import { validateChatId, type LoopbackBinding } from "./config.ts";
 
 /**
  * The bridge seam, proven end to end by the live lanes: a custom tool the chat
@@ -41,6 +47,121 @@ export const echoTool: ToolDefinition = defineTool({
 
 type ChatState = "idle" | "running";
 
+/** The loopback MCP tool names are namespaced `mcp__owui__<tool>`. */
+const BRIDGE_TOOL_PREFIX = "mcp__owui__";
+/** How long a binding swap waits for the reconnect before letting the run start. */
+const BRIDGE_RECONNECT_WAIT_MS = 10_000;
+
+/**
+ * The bridge handle the session manager drives between runs: sync() applies
+ * the latest binding and returns only once the loopback tools are executable
+ * again. The extension factory replaces the placeholder sync when it binds.
+ */
+export interface BridgeControl {
+	sync: () => Promise<void>;
+}
+
+/**
+ * The loopback tool bridge (PR4, issue 7): the backend mints a short-TTL
+ * signed binding every turn and rides it on the session create/refresh; this
+ * ref is the latest binding the session's bridge extension reads.
+ */
+interface BindingRef {
+	current: LoopbackBinding | undefined;
+}
+
+/**
+ * Exposure per the tool-bridge decision (issue 7): the everyday spine is
+ * direct, the big inventories (knowledge, chat files, the MCP relay) stay
+ * deferred behind tool search, and code-mode is on. Memory writers ride
+ * direct unguarded with ownership scoping only, per the decision.
+ */
+const DIRECT_EXPOSURE_TOOLS = [
+	"search_web",
+	"fetch_url",
+	"execute_code",
+	"generate_image",
+	"search_memories",
+	"read_memory_path",
+	"list_memory_paths",
+	"list_memories",
+	"add_memory",
+	"update_memory",
+	"replace_memory_content",
+	"delete_memory",
+];
+const DEFERRED_EXPOSURE_TOOLS = [
+	"list_knowledge_bases",
+	"search_knowledge_bases",
+	"query_knowledge_bases",
+	"list_knowledge",
+	"search_knowledge_files",
+	"grep_knowledge_files",
+	"query_knowledge_files",
+	"view_knowledge_file",
+	"list_chat_files",
+	"query_chat_files",
+	"grep_chat_files",
+	"view_file",
+];
+
+/**
+ * Registers the session's bridge server with pi's MCP machinery. The MCP
+ * extension connects it on session_start; a later binding token is applied
+ * between runs through {@link BridgeControl.sync}, never inside a run, so a
+ * short-TTL binding outlives the turn that minted it.
+ */
+export function buildLoopbackBridgeExtension(bindingRef: BindingRef, control: BridgeControl): ExtensionFactory {
+	let registeredToken: string | undefined;
+	const serverConfig = (): McpServerConfig | undefined => {
+		const binding = bindingRef.current;
+		if (!binding) return undefined;
+		return {
+			type: "http",
+			url: binding.url,
+			headers: { Authorization: `Bearer ${binding.token}` },
+			description:
+				"Open WebUI's own capabilities: memory, knowledge bases, chat files, web search, images, code, workspace tools, and relayed MCP servers.",
+			exposure: "codemode",
+			toolExposure: {
+				// The turn's own tool selection rides the binding as direct.
+				...Object.fromEntries((binding.direct ?? []).map((name) => [name, "direct" as const])),
+				...Object.fromEntries(DIRECT_EXPOSURE_TOOLS.map((name) => [name, "direct" as const])),
+				...Object.fromEntries(DEFERRED_EXPOSURE_TOOLS.map((name) => [name, "deferred" as const])),
+				"*": "deferred",
+			},
+		};
+	};
+	return (pi) => {
+		const register = () => {
+			const config = serverConfig();
+			if (!config) return;
+			pi.registerMcpServer("owui", config);
+			registeredToken = bindingRef.current?.token;
+		};
+		pi.on("session_start", () => register());
+		// A re-register with a changed config makes the MCP extension hide the
+		// bridge tools synchronously and reconnect asynchronously. Inside a run
+		// that poisons the turn: the run's context snapshot and tool declarations
+		// are already built from the pre-drop registry, so the model calls tools
+		// that are no longer executable ("Tool mcp__owui__... not found"). The
+		// binding only changes between runs, so prompt() applies it here.
+		control.sync = async () => {
+			const binding = bindingRef.current;
+			if (!binding || binding.token === registeredToken) return;
+			register();
+			// registerMcpServer hides the old connection's tools synchronously;
+			// hold the run until the reconnect has re-registered the served ones.
+			const deadline = Date.now() + BRIDGE_RECONNECT_WAIT_MS;
+			while (Date.now() < deadline) {
+				const tools = pi.getAllTools().filter((tool) => tool.name.startsWith(BRIDGE_TOOL_PREFIX));
+				if (tools.some((tool) => tool.exposure !== "hidden")) return;
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+		};
+	};
+}
+
 /**
  * The interaction gate (issue 6: approvals)。 In 'ask' mode every tool call
  * pauses inside pi's `tool_call` hook until the bridge delivers the browser's
@@ -62,6 +183,10 @@ interface ChatEntry {
 	state: ChatState;
 	resumed: boolean;
 	gate: InteractionGate;
+	/** The latest loopback binding the backend minted for this chat. */
+	bindingRef: BindingRef;
+	/** The bridge handle; its sync is wired when the bridge extension binds. */
+	bridge: BridgeControl;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
 	abortRequested: boolean;
 	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
@@ -237,11 +362,12 @@ export class SessionRegistry {
 		return waiter ? [waiter.id] : [];
 	}
 
-	/** Idempotent: a second get() for a live chat returns the same entry. */
-	async get(chatId: string, system?: string): Promise<ChatEntry> {
+	/** Idempotent: a second get() for a live chat returns the same entry, with the freshest binding. */
+	async get(chatId: string, system?: string, binding?: LoopbackBinding): Promise<ChatEntry> {
 		validateChatId(chatId);
 		const existing = this.chats.get(chatId);
 		if (existing) {
+			existing.bindingRef.current = binding ?? existing.bindingRef.current;
 			existing.lastUsedAt = Date.now();
 			existing.lastUsedSeq = this.touch();
 			return existing;
@@ -255,24 +381,36 @@ export class SessionRegistry {
 			: SessionManager.create(this.config.cwd, sessionDir);
 
 		const gate: InteractionGate = { ask: false, waiter: null, pump: null };
+		const bindingRef: BindingRef = { current: binding };
+		const bridge: BridgeControl = { sync: async () => undefined };
+		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge);
+		// Loads the factories (bridge registrar, MCP connector, codemode, tool
+		// search) and runs extensionsOverride, which splices the gate in.
+		await resourceLoader.reload();
 		const { session } = await createAgentSession({
 			cwd: this.config.cwd,
 			modelRuntime: this.modelRuntime,
 			model: this.model,
 			thinkingLevel: "off",
-			// Built-ins stay off until the loopback tool bridge (PR4). The echo
-			// tool must stay active: it is the bridge seam under test.
+			// Built-ins stay off: the bridge carries OWUI's own tool surface (PR4).
+			// The echo tool stays active: it is the bridge seam under test.
 			noTools: "builtin",
 			customTools: [echoTool],
 			sessionManager,
 			settingsManager: SettingsManager.inMemory({
 				compaction: { enabled: false },
 				retry: { enabled: false },
+				// Code-mode is on and tool search activates for the deferred
+				// families once the bridge server connects (issue 7).
+				...(bindingRef.current ? { defaultTools: ["+codemode", "+tool_search"] } : {}),
 			}),
 			// The prompt head (system + injections) hands off wholesale from the
 			// Python backend (issue 4); an empty head falls back to the default.
-			resourceLoader: minimalResourceLoader(system, buildInteractionExtension(gate)),
+			resourceLoader,
 		});
+		// Emits session_start: the bridge extension registers the loopback
+		// server and the MCP extension connects it in the background.
+		await session.bindExtensions({});
 
 		const now = Date.now();
 		const entry: ChatEntry = {
@@ -281,6 +419,8 @@ export class SessionRegistry {
 			state: "idle",
 			resumed: Boolean(latest),
 			gate,
+			bindingRef,
+			bridge,
 			abortRequested: false,
 			lastUsedAt: now,
 			lastUsedSeq: this.touch(),
@@ -289,6 +429,43 @@ export class SessionRegistry {
 		};
 		this.chats.set(chatId, entry);
 		return entry;
+	}
+
+	/**
+	 * The session resource loader: the prompt head handed off from the Python
+	 * backend, the approval gate extension, and — when the chat carries a
+	 * loopback binding — the bridge extensions that connect the loopback MCP
+	 * server through pi's MCP machinery (PR4). No skills, themes, prompts, or
+	 * context files: the chat's prompt head is the whole resource surface.
+	 */
+	private bridgeResourceLoader(
+		system: string | undefined,
+		gate: InteractionGate,
+		bindingRef: BindingRef,
+		bridge: BridgeControl,
+	) {
+		const extensionFactories: InlineExtension[] = [];
+		if (bindingRef.current) {
+			extensionFactories.push(
+				buildLoopbackBridgeExtension(bindingRef, bridge),
+				createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }) }),
+				createCodemodeExtension({ mode: "on" }),
+				createToolSearchExtension(),
+			);
+		}
+		return new DefaultResourceLoader({
+			cwd: this.config.cwd,
+			agentDir: this.config.agentDir,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			systemPrompt: system?.trim() || DEFAULT_SYSTEM_PROMPT,
+			appendSystemPromptOverride: () => [],
+			agentsFilesOverride: () => ({ agentsFiles: [] }),
+			extensionFactories,
+			extensionsOverride: (base) => ({ ...base, extensions: [buildInteractionExtension(gate), ...base.extensions] }),
+		});
 	}
 
 	/** User turns hosted by a chat's session, as the rebuilt session sees them. */
@@ -391,6 +568,9 @@ export class SessionRegistry {
 		entry.lastUsedSeq = this.touch();
 		let lastStopReason: string | undefined;
 		try {
+			// Apply the turn's binding outside the run: a mid-run re-register
+			// hides the bridge tools while the run already holds its snapshot.
+			await entry.bridge.sync();
 			const unsubscribe = entry.session.subscribe((event) => {
 				if (event.type === "message_end" && event.message?.role === "assistant") {
 					lastStopReason = String((event.message as { stopReason?: string }).stopReason);
@@ -485,22 +665,7 @@ export class SessionRegistry {
 	}
 }
 
-function minimalResourceLoader(system?: string, ...extensions: Extension[]) {
-	return {
-		getExtensions: () => ({ extensions, errors: [], runtime: createExtensionRuntime() }),
-		getSkills: () => ({ skills: [], diagnostics: [] }),
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
-		getThemes: () => ({ themes: [], diagnostics: [] }),
-		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () =>
-			system?.trim() || "You are the Open WebUI chat agent. Answer directly and concisely.",
-		getSystemPromptSource: () => undefined,
-		getAppendSystemPrompt: () => [],
-		getAppendSystemPromptSources: () => [],
-		extendResources: () => {},
-		reload: async () => {},
-	};
-}
+const DEFAULT_SYSTEM_PROMPT = "You are the Open WebUI chat agent. Answer directly and concisely.";
 
 /**
  * The approval gate extension: one inline extension per session. In 'ask'

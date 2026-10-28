@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { SidecarConfig } from "./config.ts";
-import { ConfigError, validateChatId } from "./config.ts";
+import { ConfigError, parseLoopbackBinding, validateChatId } from "./config.ts";
 import type { SessionRegistry } from "./session.ts";
 import { SessionConflictError, UnknownChatError, type InteractionAction } from "./session.ts";
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -103,7 +103,8 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 			const body = await readJsonBody(req);
 			const chatId = validateChatId(requireString(body, "chatId"));
 			const system = typeof body.system === "string" ? body.system : undefined;
-			const entry = await registry.get(chatId, system);
+			const binding = parseLoopbackBinding(body);
+			const entry = await registry.get(chatId, system, binding);
 			writeJson(res, 200, {
 				ok: true,
 				chatId,

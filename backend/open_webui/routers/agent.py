@@ -40,6 +40,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from open_webui.models.chats import Chats
+from open_webui.loopback_mcp import mint_session_binding
 from open_webui.utils.chat_id import is_saved_chat_id
 
 log = logging.getLogger(__name__)
@@ -107,7 +108,18 @@ def _delivery_mode(metadata: dict) -> str:
 
 
 async def ensure_session(client: httpx.AsyncClient, chat_id: str, system: str | None) -> dict:
-    response = await client.post('/sessions', json={'chatId': chat_id, **({'system': system} if system else {})})
+    payload: dict = {'chatId': chat_id, **({'system': system} if system else {})}
+    raw_binding = client.headers.pop('x-agent-loopback-binding', None)
+    if raw_binding:
+        # The loopback tool bridge binding (issue 7) rides the client headers
+        # rather than the call signature: the three-argument shape is the seam
+        # PR3's parity harness patches. One shot: consumed by this create or
+        # refresh, then gone.
+        try:
+            payload['binding'] = json.loads(raw_binding)
+        except json.JSONDecodeError:
+            log.warning('agent bridge: dropping a malformed loopback binding')
+    response = await client.post('/sessions', json=payload)
     response.raise_for_status()
     return response.json()
 
@@ -500,6 +512,15 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
 
     client = _client()
     try:
+        # The loopback tool bridge: a fresh short-TTL binding every turn, so a
+        # rebuilt session re-enters with a live token and a running session
+        # refreshes its MCP entry at the next turn_start. The mint needs the
+        # request's own address for the bridge URL; a request-less dispatch
+        # (internal calls, direct harness drives) carries no binding and the
+        # bridge stays off for that turn.
+        binding = mint_session_binding(request, user, metadata, form_data.get('model')) if request is not None else None
+        if binding:
+            client.headers['x-agent-loopback-binding'] = json.dumps(binding)
         session_info = await ensure_session(client, chat_id, head or None)
 
         if session_info.get('running'):
