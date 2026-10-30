@@ -41,6 +41,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from open_webui.models.chats import Chats
 from open_webui.loopback_mcp import mint_session_binding
+from open_webui.routers.agent_machines import mint_machine_binding
 from open_webui.utils.chat_id import is_saved_chat_id
 
 log = logging.getLogger(__name__)
@@ -520,6 +521,9 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
         # bridge stays off for that turn.
         binding = mint_session_binding(request, user, metadata, form_data.get('model')) if request is not None else None
         if binding:
+            machine = await mint_machine_binding(request, user, metadata, form_data.get('model'))
+            if machine:
+                binding['machine'] = machine
             client.headers['x-agent-loopback-binding'] = json.dumps(binding)
         session_info = await ensure_session(client, chat_id, head or None)
 
