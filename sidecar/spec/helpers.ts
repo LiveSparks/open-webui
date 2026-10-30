@@ -25,12 +25,19 @@ export function flattenContent(content: unknown): string {
  * - tool result present replies "tool said: <content>"
  * - anything else replies "echoed: <text>" in two chunks
  */
-export function startFakeProvider(): Promise<{ port: number; requests: string[]; close: () => Promise<void> }> {
+export function startFakeProvider(): Promise<{
+	port: number;
+	requests: string[];
+	entries: { path: string; headers: Record<string, string>; body: string }[];
+	close: () => Promise<void>;
+}> {
 	const requests: string[] = [];
+	const entries: { path: string; headers: Record<string, string>; body: string }[] = [];
 	const server: Server = createServer((req, res) => {
 		let body = "";
 		req.on("data", (chunk: Buffer) => (body += chunk.toString()));
 		req.on("end", () => {
+			entries.push({ path: req.url ?? "/", headers: { ...req.headers } as Record<string, string>, body });
 			requests.push(body);
 			const parsed = JSON.parse(body) as {
 				messages: Array<{ role: string; content: unknown }>;
@@ -119,6 +126,7 @@ export function startFakeProvider(): Promise<{ port: number; requests: string[];
 			resolve({
 				port: address.port,
 				requests,
+				entries,
 				close: () => new Promise((done) => server.close(() => done())),
 			});
 		});
@@ -154,6 +162,16 @@ export async function buildTestBed(name: string, options?: { cap?: number; ttlMs
 							contextWindow: 32000,
 							maxTokens: 8192,
 							reasoning: false,
+						},
+						{
+							id: "scripted-thinker",
+							name: "Scripted Thinker",
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 32000,
+							maxTokens: 8192,
+							reasoning: true,
+							thinkingLevelMap: { off: "off", medium: "medium", high: "high", xhigh: null, max: null },
 						},
 					],
 				},

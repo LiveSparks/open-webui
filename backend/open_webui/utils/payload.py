@@ -103,6 +103,9 @@ def apply_model_params_to_body(params: dict, form_data: dict, mappings: dict[str
 
 
 def apply_params_to_form_data(form_data: dict, model: dict, params: dict | None = None) -> dict:
+    # A `params` argument marks a task call (apply_task_model_params); only
+    # real chat turns resolve the agent-loop handoff params (PR6).
+    is_chat_turn = params is None
     payload_params = form_data.pop('params', {}) or {}
     params = payload_params if params is None else dict(params)
     custom_params = params.pop('custom_params', {})
@@ -149,6 +152,16 @@ def apply_params_to_form_data(form_data: dict, model: dict, params: dict | None 
                     form_data['logit_bias'] = JSONCodec.loads(logit_bias)
             except Exception as e:
                 log.exception(f'Error parsing logit_bias: {e}')
+
+    if is_chat_turn and isinstance(params, dict) and params:
+        # The agent loop (PR6): the sidecar handoff carries the resolved
+        # per-turn params (Chat Controls + custom_params, reasoning effort
+        # included). Stashed for the agent dispatch, which pops it; a task
+        # call never reaches the sidecar and never gets one.
+        from open_webui.routers.agent import is_agent_model
+
+        if is_agent_model(form_data.get('model') or ''):
+            form_data['agent_params'] = {key: value for key, value in params.items() if value is not None}
 
     return form_data
 

@@ -11,7 +11,7 @@ async function main(): Promise<void> {
 	});
 	const model = resolveModel(config, modelRuntime);
 	const registry = new SessionRegistry(config, modelRuntime, model);
-	const surface = createHttpSurface({ config, registry });
+	const surface = createHttpSurface({ config, registry, modelRuntime });
 
 	await surface.listen();
 	console.log(

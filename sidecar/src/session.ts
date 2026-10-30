@@ -25,6 +25,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { SidecarConfig } from "./config.ts";
 import { validateChatId, type LoopbackBinding } from "./config.ts";
 import { buildMachineTools, machineChatRoot } from "./machineTools.ts";
+import { createTurnController, buildTurnExtension, type TurnController, type TurnEnvelope, type TurnState, applyTurnEnvelope } from "./providers.ts";
 
 /**
  * The bridge seam, proven end to end by the live lanes: a custom tool the chat
@@ -192,6 +193,8 @@ interface ChatEntry {
 	bridge: BridgeControl;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
 	abortRequested: boolean;
+	/** The per-turn model/key/header handoff (PR6); bound when the session carries a loopback binding. */
+	turn: TurnController | undefined;
 	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
 	lastUsedAt: number;
 	/** Monotonic tiebreaker over lastUsedAt: a strict LRU order. */
@@ -208,6 +211,12 @@ export interface PromptResult {
 	sessionId: string;
 	sessionFile?: string;
 	error?: string;
+}
+
+export interface PromptOptions {
+	toolApproval?: "ask" | "full";
+	/** The turn's resolved model/key/header envelope, pushed fresh by the backend (PR6). */
+	turn?: TurnEnvelope;
 }
 
 export type SessionEventHandler = (event: unknown) => void;
@@ -395,7 +404,8 @@ export class SessionRegistry {
 		const machineBound = Boolean(bindingRef.current?.machine);
 		const sessionCwd = machineBound ? machineChatRoot(chatId) : this.config.cwd;
 		const bridge: BridgeControl = { sync: async () => undefined };
-		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge);
+		const turnState: TurnState = { current: undefined };
+		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge, turnState);
 		// Loads the factories (bridge registrar, MCP connector, codemode, tool
 		// search) and runs extensionsOverride, which splices the gate in.
 		await resourceLoader.reload();
@@ -403,7 +413,11 @@ export class SessionRegistry {
 			cwd: sessionCwd,
 			modelRuntime: this.modelRuntime,
 			model: this.model,
-			thinkingLevel: "off",
+			// The thinking level comes from the per-turn envelope (PR6, issue 20):
+			// the envelope always lands one between turns, so sessions under the
+			// handoff keep pi's default. Sessions without a binding keep the
+			// fixed 'off' the PR3 bridge shipped with.
+			...(bindingRef.current ? {} : { thinkingLevel: "off" as const }),
 			// Built-ins stay off: the bridge carries OWUI's own tool surface (PR4)
 			// and a selected machine carries the rebound built-ins (PR5). The echo
 			// tool stays active: it is the bridge seam under test.
@@ -426,6 +440,9 @@ export class SessionRegistry {
 		// Emits session_start: the bridge extension registers the loopback
 		// server and the MCP extension connects it in the background.
 		await session.bindExtensions({});
+		const turn: TurnController | undefined = bindingRef.current
+			? createTurnController(session, this.modelRuntime, () => bindingRef.current, turnState)
+			: undefined;
 
 		const now = Date.now();
 		const entry: ChatEntry = {
@@ -437,6 +454,7 @@ export class SessionRegistry {
 			bindingRef,
 			machineBound,
 			bridge,
+			turn,
 			abortRequested: false,
 			lastUsedAt: now,
 			lastUsedSeq: this.touch(),
@@ -459,11 +477,14 @@ export class SessionRegistry {
 		gate: InteractionGate,
 		bindingRef: BindingRef,
 		bridge: BridgeControl,
+		turnState: TurnState,
 	) {
 		const extensionFactories: InlineExtension[] = [];
 		if (bindingRef.current) {
 			extensionFactories.push(
 				buildLoopbackBridgeExtension(bindingRef, bridge),
+				// The per-request seams (PR6, issue 23): header map + payload params.
+				buildTurnExtension(turnState),
 				createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }) }),
 				createCodemodeExtension({ mode: "on" }),
 				createToolSearchExtension(),
@@ -546,7 +567,9 @@ export class SessionRegistry {
 
 		entry.session.dispose();
 		this.chats.delete(chatId);
-		const rebuilt = await this.get(chatId);
+		// The rebuilt session re-enters with the live binding: the fork must not
+		// silently strip the bridge and the per-turn handoff wiring (PR6).
+		const rebuilt = await this.get(chatId, undefined, entry.bindingRef.current);
 		return {
 			forked: true,
 			sessionId: rebuilt.session.sessionId,
@@ -560,7 +583,7 @@ export class SessionRegistry {
 		chatId: string,
 		text: string,
 		onEvent: SessionEventHandler,
-		options?: { toolApproval?: "ask" | "full" },
+		options?: { toolApproval?: "ask" | "full"; turn?: TurnEnvelope },
 	): Promise<PromptResult> {
 		const entry = this.chats.get(chatId);
 		if (!entry) {
@@ -584,6 +607,16 @@ export class SessionRegistry {
 		entry.lastUsedSeq = this.touch();
 		let lastStopReason: string | undefined;
 		try {
+			// Apply the turn's resolved model/key/header envelope (PR6): every
+			// turn resolves fresh, so a model switch or a rotated key is simply
+			// the next turn. Outside the run, like the binding sync below.
+			if (options?.turn) {
+				if (entry.turn) {
+					await entry.turn.apply(options.turn);
+				} else {
+					await applyTurnEnvelope(entry.session, this.modelRuntime, options.turn);
+				}
+			}
 			// Apply the turn's binding outside the run: a mid-run re-register
 			// hides the bridge tools while the run already holds its snapshot.
 			await entry.bridge.sync();

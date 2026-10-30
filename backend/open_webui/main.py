@@ -151,6 +151,7 @@ from open_webui.models.groups import Groups, resolve_group_default_models
 from open_webui.models.users import Users
 from open_webui.loopback_mcp import router as loopback_mcp_router
 from open_webui.routers.agent_machines import router as agent_machines_router
+from open_webui.routers.agent_runtime import router as agent_runtime_router
 from open_webui.routers import (
     apps,
     analytics,
@@ -884,6 +885,10 @@ app.include_router(loopback_mcp_router, prefix='/loopback/mcp', tags=['loopback'
 
 # Machine loopback executor (PR5): the sidecar's rebound bash/read/edit/write dials this.
 app.include_router(agent_machines_router, prefix='/loopback/machines', tags=['loopback'])
+
+# Agent handoff (PR6): the sidecar's per-call key fetch dials this with the
+# same session binding. Auth is the signed token, never a credential.
+app.include_router(agent_runtime_router, prefix='/loopback/agent', tags=['loopback'])
 
 
 app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])
