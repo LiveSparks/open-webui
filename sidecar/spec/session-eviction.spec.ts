@@ -56,6 +56,23 @@ describe("SessionRegistry eviction (ADR 0006)", () => {
 		bed.registry.sweep(Date.now() + 16 * 60 * 1000);
 		expect(bed.registry.sessionCount).toBe(1);
 	});
+
+	it("never evicts a queued child or its awaiting parent while the delegation edge is undelivered (PR9)", async () => {
+		await bed.registry.get("chat-parent-edge");
+		bed.registry.registerChildEdge("child-queued", "chat-parent-edge", "background");
+
+		bed.registry.sweep(Date.now() + 16 * 60 * 1000);
+		expect(bed.registry.sessionCount).toBe(1);
+		expect(bed.registry.isUndeliveredChild("child-queued")).toBe(true);
+		expect(bed.registry.hasUndeliveredChildren("chat-parent-edge")).toBe(true);
+
+		// Delivered clears the guard; the parent is freewheeling again.
+		bed.registry.markChildDelivered("child-queued");
+		expect(bed.registry.hasUndeliveredChildren("chat-parent-edge")).toBe(false);
+
+		const entry = await bed.registry.get("chat-parent-edge");
+		expect(entry.hasBackgroundChildren()).toBe(false);
+	});
 });
 
 describe("SessionRegistry eviction at the cap", () => {

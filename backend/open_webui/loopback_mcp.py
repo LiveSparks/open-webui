@@ -229,7 +229,8 @@ async def resolve_bridge_tools(request: Request, claims: dict) -> tuple[dict[str
     if user is None:
         raise HTTPException(status_code=401, detail='binding user no longer exists')
     chat_id = claims.get('chat_id') or ''
-    if chat_id and await Chats.get_chat_by_id(chat_id) is None:
+    chat = await Chats.get_chat_by_id(chat_id) if chat_id else None
+    if chat_id and chat is None:
         raise HTTPException(status_code=401, detail='binding chat no longer exists')
 
     model_id = claims.get('model_id') or ''
@@ -278,7 +279,30 @@ async def resolve_bridge_tools(request: Request, claims: dict) -> tuple[dict[str
     for name, tool_dict in builtin_tools.items():
         if name not in tools_dict:
             tools_dict[name] = tool_dict
-    return tools_dict, clients
+    return _strip_child_tools(tools_dict, chat), clients
+
+
+def _strip_child_tools(tools_dict: dict[str, dict], chat) -> dict[str, dict]:
+    """The tool surface a sub-agent child reaches (PR9, issues 10 and 18).
+
+    A child is the chat whose meta says it is a delegation record: the full
+    bridge minus the delegation family (recursion banned, the tool simply
+    absent from the child's set) and minus the mutating memory tools the
+    native loop strips from internal calls. Fail closed: an attempt to call
+    one lands as 'tool not bridged' at dispatch, never as a live call."""
+    if chat is None:
+        return tools_dict
+    meta = chat.meta or {}
+    if meta.get('internal') is not True or meta.get('type') != 'subagent':
+        return tools_dict
+    from open_webui.utils.subagents import MUTATING_MEMORY_TOOLS
+
+    stripped = {'delegate_task', 'timer', *MUTATING_MEMORY_TOOLS}
+    return {
+        name: tool_dict
+        for name, tool_dict in tools_dict.items()
+        if name not in stripped and (tool_dict.get('spec') or {}).get('name', name) not in stripped
+    }
 
 
 def _mcp_tools_payload(tools_dict: dict[str, dict]) -> list[dict]:

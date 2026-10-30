@@ -159,12 +159,22 @@ async def stream_sidecar_events(
     message: str,
     tool_approval: str = 'full',
     turn: dict | None = None,
+    max_turns: int | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Yield `(event, data)` frames from the sidecar prompt SSE stream."""
+    # A sub-agent child spawn carries its assistant-turn budget (PR9, issue
+    # 18): the sidecar realizes it as a finishTurn hook. Parent turns carry
+    # none and stay uncapped, as today.
+    body: dict = {
+        'message': message,
+        'toolApproval': tool_approval,
+        **({'turn': turn} if turn else {}),
+        **({'maxTurns': max_turns} if max_turns else {}),
+    }
     async with client.stream(
         'POST',
         f'/sessions/{chat_id}/prompt',
-        json={'message': message, 'toolApproval': tool_approval, **({'turn': turn} if turn else {})},
+        json=body,
         timeout=None,
     ) as response:
         if response.status_code >= 400:
@@ -577,10 +587,14 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
 
         turn = await build_turn_envelope(request, user, form_data, metadata)
 
+        max_turns = getattr(request.state, 'max_tool_call_iterations', None)
+
         async def sse_stream() -> AsyncIterator[str]:
             translator = PiEventTranslator()
             try:
-                async for event, data in stream_sidecar_events(client, chat_id, prompt_text, tool_approval, turn):
+                async for event, data in stream_sidecar_events(
+                    client, chat_id, prompt_text, tool_approval, turn, max_turns
+                ):
                     async for line in translator.translate(event, data):
                         yield line
                     for line in translator.flush_lines():

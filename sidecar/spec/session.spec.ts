@@ -16,6 +16,40 @@ afterEach(async () => {
 });
 
 describe("SessionRegistry", () => {
+	it("caps a delegation's assistant turns with the finishTurn hook and reports the native limit string", async () => {
+		// One tool-call round is more than the cap: the run stops after the
+		// first round instead of continuing, and the result carries the same
+		// error trunk's loop reports.
+		await bed.registry.get("chat-turncap");
+		const result = await bed.registry.prompt(
+			"chat-turncap",
+			"TOOL_ECHO roundtrip",
+			() => {},
+			{ maxTurns: 1 },
+		);
+		expect(result.reason).toBe("error");
+		expect(result.error).toBe("Tool-call limit reached (1 iterations).");
+		expect(
+			result.assistantText?.includes("tool said:") ? "ran past the cap" : result.assistantText,
+		).toBe(result.assistantText);
+
+		// A cap above the rounds the prompt needs is not a failure: the run
+		// completes on its own.
+		await bed.registry.get("chat-turncap-2");
+		const roomy = await bed.registry.prompt(
+			"chat-turncap-2",
+			"TOOL_ECHO roundtrip",
+			() => {},
+			{ maxTurns: 8 },
+		);
+		expect(roomy.reason).toBe("completed");
+		expect(roomy.assistantText).toContain("tool said: echo:fake-was-here:TOOL_ECHO roundtrip");
+
+		// The cap does not bind the next run of the same session.
+		const again = await bed.registry.prompt("chat-turncap-2", "plain text", () => {});
+		expect(again.reason).toBe("completed");
+	});
+
 	it("creates a session, echoes the scripted reply, and persists JSONL on disk", async () => {
 		await bed.registry.get("chat-create");
 

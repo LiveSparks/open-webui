@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import time
 import weakref
 from datetime import timedelta
 from uuid import uuid4
 
+import httpx
 from fastapi import Request
 from fastapi.security import HTTPAuthorizationCredentials
 from open_webui.models.chat_messages import ChatMessages
@@ -39,23 +41,62 @@ MUTATING_MEMORY_TOOLS = {
     'update_memory',
 }
 
+log = logging.getLogger(__name__)
+
 _background_active: set[str] = set()
 _background_lock = asyncio.Lock()
 _foreground_semaphore: asyncio.Semaphore | None = None
 _parent_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
+async def _sidecar_child_edge(chat_id: str, parent_chat_id: str, mode: str, *, delivered: bool = False) -> None:
+    """Tell the sidecar where a delegation lives, best effort (issue 29).
+
+    The registry's eviction policy never evicts a child while it is running
+    or queued, and never a parent while a background child still owes it a
+    result. The sidecar cannot derive that from the child chat id alone, so
+    the spawn registers the edge (`POST /sessions/<child>/child`) and the
+    result delivery clears it (`POST /sessions/<child>/delivered`). A dead or
+    unreachable sidecar only loses the guard, never the turn."""
+    from open_webui.routers.agent import sidecar_base_url
+
+    base = sidecar_base_url()
+    if not base:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            route = 'delivered' if delivered else 'child'
+            response = await client.post(
+                f'{base}/sessions/{chat_id}/{route}',
+                json={**({} if delivered else {'parent': parent_chat_id, 'mode': mode})},
+            )
+            response.raise_for_status()
+    except Exception as exc:
+        log.warning('subagent: sidecar %s for child %s failed: %s', route, chat_id, exc)
+
+
 async def _build_request(source: Request, user_id: str, *, internal: bool) -> Request:
+    # The synthetic request must answer request.base_url like a real one: the
+    # agent loop mints this turn's loopback bindings (tool bridge, machine
+    # executor, key route) against it, so it inherits the source request's
+    # scheme and host instead of the 127.0.0.1:80 placeholder a bare scope
+    # would produce (a delegation through the loopback bridge arrived on a
+    # real backend address).
+    source_url = source.url
+    scheme = source_url.scheme or 'http'
+    port = source_url.port or (443 if scheme == 'https' else 80)
+    server = (source_url.hostname or '127.0.0.1', port)
+    headers = [('user-agent', value) for value in (source.headers.get('user-agent', ''),) if value]
     scope = {
         'type': 'http',
         'asgi': {'version': '3.0', 'spec_version': '2.0'},
         'method': 'POST',
         'path': '/api/v1/subagents/internal',
         'query_string': b'',
-        'headers': Headers({}).raw,
+        'headers': headers,
         'client': ('127.0.0.1', 0),
-        'server': ('127.0.0.1', 80),
-        'scheme': 'http',
+        'server': server,
+        'scheme': scheme,
         'app': source.app,
     }
     request = Request(scope)
@@ -306,7 +347,10 @@ async def delegate(
     )
     max_concurrent = int(config.get('subagents.max_concurrent') or 20)
     max_async = int(config.get('subagents.max_async') or 20)
-    max_iterations = int(config.get('subagents.max_iterations') or 30)
+    # The pi loop counts assistant turns (issue 18): the default raised to the
+    # same boundary an ordinary chat loop gets today, so a delegation aborts
+    # only when turns are abnormally high.
+    max_iterations = int(config.get('subagents.max_iterations') or 256)
     max_output = int(config.get('subagents.max_output') or 30_000)
     if max_concurrent != -1:
         max_concurrent = max(1, max_concurrent)
@@ -330,7 +374,10 @@ async def delegate(
         'tool_ids': copy.deepcopy(metadata.get('tool_ids') or []),
         'skill_ids': copy.deepcopy(metadata.get('skill_ids') or []),
         'chat_context': copy.deepcopy(metadata.get('chat_context') or {}),
-        'tool_servers': [] if background else copy.deepcopy(metadata.get('tool_servers') or []),
+        # Background children inherit the machine tools like foreground ones
+        # (issue 10: the deliberate change from the pre-engine strip); no
+        # machine selected at spawn means no machine tools, fail closed.
+        'tool_servers': copy.deepcopy(metadata.get('tool_servers') or []),
         'filter_ids': copy.deepcopy(metadata.get('filter_ids') or []),
         'terminal_id': metadata.get('terminal_id'),
         'features': features,
@@ -545,6 +592,11 @@ async def delegate(
                     _background_active.discard(delegation_id)
             elif foreground_semaphore:
                 foreground_semaphore.release()
+            if not background:
+                # A foreground child's result is delivered the moment the
+                # tool call resolves; the eviction guard lives only for the
+                # run and the queue window before it.
+                await _sidecar_child_edge(chat_id, parent_chat_id, mode, delivered=True)
 
     async def run_background() -> dict:
         started_at = time.time()
@@ -667,10 +719,12 @@ async def delegate(
             )
         if not await has_active_tasks(request.app.state.redis, parent_chat_id):
             await process_pending_internal_messages(request, parent_chat_id, user.id, run)
+        await _sidecar_child_edge(chat_id, parent_chat_id, mode, delivered=True)
         if cancelled:
             raise asyncio.CancelledError
         return result
 
+    await _sidecar_child_edge(chat_id, parent_chat_id, mode)
     try:
         _, child_task = await create_task(
             request.app.state.redis,
