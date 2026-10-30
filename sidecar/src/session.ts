@@ -809,7 +809,7 @@ function installTurnCap(session: AgentSession, maxTurns: number | undefined): Tu
 	agent.finishTurn = async (turn, signal): Promise<AgentTurnDecision | undefined> => {
 		const content = turn.message.content ?? [];
 		const toolCalls = Array.isArray(content)
-			? content.filter((part): part is { type: string } => (part as { type?: string })?.type === "toolCall")
+			? content.filter((part) => (part as { type?: string })?.type === "toolCall")
 			: [];
 		if (toolCalls.length === 0) {
 			// A terminal turn ends the loop on its own: the counter counts the
