@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -221,6 +222,15 @@ def _content_to_text(content: Any) -> str:
     return ''
 
 
+class CodeInterpreterStreamError(Exception):
+    """The bridged execute_code turn streamed code-interpreter deltas
+    (PR7); the browser renders the native "Analyzed" block from them."""
+
+    def __init__(self, payload: dict | None = None):
+        super().__init__('code interpreter stream')
+        self.payload = payload or {}
+
+
 class PiEventTranslator:
     """Stateful translation of one sidecar run into translated SSE lines.
 
@@ -244,6 +254,24 @@ class PiEventTranslator:
         self.usage: dict | None = None
         self.error: dict | None = None
         self.aborted = False
+        # The code interpreter rides the loopback bridge: the tool's code text
+        # streams through the normal message_update path and is captured here
+        # so the result can carry the code back to the Analyzed block.
+        self._pending_code: dict[str, str] = {}
+
+    @staticmethod
+    def _tool_call_of(event: dict) -> dict:
+        """A pi toolcall event's flat tool call, from the event or its partial.
+
+        toolcall_end carries the full ToolCall; toolcall_start and
+        toolcall_delta carry it inside the partial message's content."""
+        tool_call = event.get('toolCall') or {}
+        if not tool_call:
+            for content in (event.get('partial') or {}).get('content') or []:
+                if isinstance(content, dict) and content.get('type') == 'toolCall':
+                    tool_call = content
+                    break
+        return tool_call
 
     async def _emit(self, event: dict) -> None:
         # The translator runs before the response context exists, so direct
@@ -351,11 +379,71 @@ class PiEventTranslator:
                         'delta': assistant_event.get('delta', ''),
                     }
                 )
+            elif kind == 'toolcall_start':
+                # A code interpreter call opens the native "Analyzed" item on
+                # start, so the browser watches the code arrive live (PR7,
+                # plan: streamed code deltas).
+                tool_call = self._tool_call_of(assistant_event)
+                if tool_call.get('name') == 'execute_code':
+                    call_id = tool_call.get('id') or f'fc-{content_index}'
+                    item = {
+                        'type': 'open_webui:code_interpreter',
+                        'id': f'ci-{call_id}',
+                        'call_id': call_id,
+                        'status': 'in_progress',
+                        'code': '',
+                        'stdout': '',
+                        'stderr': '',
+                        'result': '',
+                        'images': [],
+                    }
+                    self.block_items[content_index] = ('open_webui:code_interpreter', self.output_index)
+                    self.call_items[call_id] = (self.output_index, item)
+                    self._pending_code[call_id] = ''
+                    yield self._added(item)
+                return
+            elif kind == 'toolcall_delta':
+                # The model writes the code as arguments deltas; the code
+                # interpreter streams them into the open item so the code
+                # text grows while the turn runs.
+                pending = self._tool_call_of(assistant_event)
+                call_id = pending.get('id') or ''
+                tracked = self.call_items.get(call_id)
+                if tracked and self._pending_code.get(call_id) is not None:
+                    delta = assistant_event.get('delta', '')
+                    index, item = tracked
+                    item['code'] = (item.get('code') or '') + delta
+                    self._pending_code[call_id] = item['code']
+                    yield self._line(
+                        {
+                            'type': 'response.output_text.delta',
+                            'output_index': index,
+                            'item_id': item.get('id'),
+                            'content_index': content_index,
+                            'delta': delta,
+                        }
+                    )
+                return
             elif kind == 'toolcall_end':
                 # pi's toolCall is flat: {type: 'toolCall', id, name, arguments}
                 tool_call = assistant_event.get('toolCall') or {}
                 call_id = tool_call.get('id') or f'fc-{content_index}'
                 arguments = tool_call.get('arguments', {})
+                # The code interpreter's code text finalizes on the argument
+                # close; the item stays in_progress until the execution result
+                # merges in at tool_execution_end.
+                if tool_call.get('name') == 'execute_code' and call_id in self.call_items:
+                    ci_args = arguments
+                    if isinstance(ci_args, str):
+                        try:
+                            ci_args = json.loads(ci_args)
+                        except Exception:
+                            ci_args = {}
+                    if isinstance(ci_args, dict) and ci_args.get('code'):
+                        index, item = self.call_items[call_id]
+                        item['code'] = ci_args.get('code')
+                        self._pending_code[call_id] = item['code']
+                    return
                 item = {
                     'type': 'function_call',
                     'id': call_id,
@@ -405,6 +493,38 @@ class PiEventTranslator:
             result = data.get('result') or {}
             result_text = _content_to_text(result.get('content') if isinstance(result, dict) else result)
             call_id = data.get('toolCallId') or f'fco-{self.output_index}'
+
+            # The code interpreter rides the bridge: an execute_code result
+            # carries the ResultModel shape {stdout, stderr, result} and
+            # translates into the native open_webui:code_interpreter item —
+            # the browser's "Analyzed" block — instead of a plain text output.
+            # The item opened at toolcall_start; the execution result merges
+            # into it and the merged item is emitted as done.
+            if tool_name == 'execute_code' and isinstance(result, dict):
+                try:
+                    tracked = self.call_items.get(call_id)
+                    code = self._pending_code.pop(call_id, None)
+                    if tracked:
+                        index, item = tracked
+                        merged = _to_code_interpreter_item(code if code is not None else item.get('code') or '', result)
+                        item.update(merged)
+                        item['status'] = 'completed'
+                        yield self._line({'type': 'response.output_item.done', 'output_index': index, 'item': item})
+                    else:
+                        ci_item = _to_code_interpreter_item(code or '', result)
+                        yield self._added(ci_item)
+                        yield self._done_item(ci_item)
+                    self.call_items.pop(call_id, None)
+                    await self._emit(
+                        {
+                            'type': 'status',
+                            'data': {'action': tool_name, 'description': 'Code interpreter done', 'done': True},
+                        }
+                    )
+                    return
+                except Exception:
+                    log.exception('code interpreter translation failed; falling back to plain tool output')
+
             item = {
                 'type': 'function_call_output',
                 # Own id: the reducer matches output items by id first, and the
@@ -469,12 +589,79 @@ class PiEventTranslator:
 
 
 # ---------------------------------------------------------------------------
+# Code interpreter translation: the bridged execute_code result maps onto the
+# native `open_webui:code_interpreter` item — the browser's "Analyzed" block.
+# The shape contract lives in `sidecar/src/codeInterpreter.ts` (the sidecar is
+# the one that talks to the browser); the backend mirrors it here so a tool
+# result lands as the native item without any extra sidecar round-trip.
+# ---------------------------------------------------------------------------
+
+
+_CODE_INTERPRETER_IMAGE_RE = re.compile(r'data:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)')
+
+
+def _to_code_interpreter_item(code: str, result: dict) -> dict:
+    """Translate a ResultModel-shaped execute_code result into the native item.
+
+    The sidecar contract (codeInterpreter.ts) defines the shape; this keeps the
+    backend and the sidecar consistent without a cross-process call. Images
+    ride the stdout/stderr/result payloads as data URIs and get extracted into
+    the `images` array the browser renders inline.
+    """
+    images = []
+    for text in (result.get('stdout'), result.get('stderr'), result.get('result')):
+        if isinstance(text, str):
+            for mime, payload in _CODE_INTERPRETER_IMAGE_RE.findall(text):
+                images.append({'type': mime.replace('image/', ''), 'base64': ''.join(payload.split())})
+    return {
+        'type': 'open_webui:code_interpreter',
+        'code': code or '',
+        'stdout': result.get('stdout') or '',
+        'stderr': result.get('stderr') or '',
+        'result': result.get('result') or '',
+        'images': images,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Chat entry: routing, inlet handoff, fork decision.
 # ---------------------------------------------------------------------------
 
 
 def _user_message_text(message: dict) -> str:
     return _content_to_text(message.get('content'))
+
+
+# The phase-1 prompt-head section (PR7): the agent's execute_code tool rides
+# the loopback bridge, and this section tells it which surface it used, where
+# it runs, and how isolated its effects are. Pyodide rides the bridge's
+# browser `execute:python` event-call on direct connections; Jupyter is the
+# server surface otherwise.
+
+
+def _code_interpreter_surface(engine: str = 'pyodide') -> str:
+    """One surface descriptor for the configured engine."""
+    if engine == 'jupyter':
+        return (
+            'Surface: Jupyter server kernel. Your code runs on the configured '
+            "Jupyter server, outside the browser, with the kernel's full "
+            'package environment. Effects persist in the kernel session until '
+            'it is restarted.'
+        )
+    return (
+        "Surface: Pyodide in the browser. Your code runs inside the user's "
+        'browser tab on a sandboxed WebAssembly Python runtime through the '
+        'bridge execute:python event-call. Effects are isolated to the '
+        'sandbox and disappear when the tab closes; no server state changes.'
+    )
+
+
+async def _code_interpreter_head_section() -> str:
+    """The phase-1 prompt-head section for execute_code (PR7, plan build)."""
+    from open_webui.models.config import Config
+
+    engine = await Config.get('code_interpreter.engine', 'pyodide')
+    return '## Code execution\n\nYou can run Python with the execute_code tool.\n\n' + _code_interpreter_surface(engine)
 
 
 def _split_head_and_turns(messages: list[dict]) -> tuple[str, list[dict], bool]:
@@ -534,6 +721,19 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
 
     client = _client()
     try:
+        # The code interpreter rides the loopback bridge (PR7): a phase-1
+        # prompt-head section tells the agent which surface it runs on, where
+        # it runs, and how isolated the effects are, before the session or the
+        # fork decides anything else.
+        try:
+            head = (
+                f'{head}\n\n{await _code_interpreter_head_section()}'
+                if head
+                else await _code_interpreter_head_section()
+            )
+        except Exception:
+            log.warning('code interpreter prompt-head section unavailable', exc_info=True)
+
         # The loopback tool bridge: a fresh short-TTL binding every turn, so a
         # rebuilt session re-enters with a live token and a running session
         # refreshes its MCP entry at the next turn_start. The mint needs the
@@ -609,6 +809,18 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
                         yield line
                     for line in translator.flush_lines():
                         yield line
+                yield translator.final_line()
+                yield 'data: [DONE]\n\n'
+
+            # The code interpreter rides the bridge (PR7): an execute_code tool
+            # turn streams its execution output as native code_interpreter
+            # deltas so the "Analyzed" block grows live, instead of a single
+            # final tool result frame.
+            except CodeInterpreterStreamError as ci_error:
+                async for line in translator.translate('code_interpreter', ci_error.payload):
+                    yield line
+                for line in translator.flush_lines():
+                    yield line
                 yield translator.final_line()
                 yield 'data: [DONE]\n\n'
             except asyncio.CancelledError:
