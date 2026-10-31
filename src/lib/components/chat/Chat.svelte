@@ -3095,6 +3095,43 @@
 
 	let processingQueueChats = new Set<string>();
 
+	// Steering (variant A, PR10): a send during a running agent-loop turn posts
+	// to the loop's steer route — the run continues in place, and the send shows
+	// as a queued note above the composer until the run's next turn addresses
+	// it. `steerAckIds` tracks the steered turn's own empty assistant shell so
+	// its ack frame neither clears the notes nor lingers as an empty bubble.
+	let steerQueue: { id: string; prompt: string }[] = [];
+	const steerAckIds = new Set<string>();
+	let steerInFlight = false;
+
+	const isAgentRouted = (modelIds: string[]) =>
+		modelIds.length > 0 &&
+		modelIds.every(
+			(modelId) =>
+				// `agent_loop` rides /api/models from the companion flag PR; absent
+				// for non-agent models until it lands, so this stays enqueue-shaped.
+				($models.find((model) => model.id === modelId) as { agent_loop?: boolean } | undefined)
+					?.agent_loop === true
+		);
+
+	// The steered turn's own assistant node stays empty (the run's own stream
+	// carries the reply): drop the ack shell so the steer reads as the queued
+	// note it is. Client-side only — the record's empty shell renders as an
+	// empty bubble after a reload, which the ordinary empty-reply path already
+	// tolerates.
+	const collapseSteerAckShell = (messageId: string) => {
+		const shell = history.messages[messageId];
+		const steerParentId = shell?.parentId;
+		if (!shell || !steerParentId || !history.messages[steerParentId]) return;
+		const steerParent = history.messages[steerParentId];
+		steerParent.childrenIds = (steerParent.childrenIds ?? []).filter(
+			(childId: string) => childId !== messageId
+		);
+		delete history.messages[messageId];
+		history.currentId = steerParentId;
+		history = history;
+	};
+
 	const processNextInQueue = async (targetChatId: string) => {
 		if (processingQueueChats.has(targetChatId) || targetChatId !== $chatId) return;
 
@@ -3157,8 +3194,10 @@
 				...q,
 				[targetChatId]: queue.filter((m) => m.id !== id)
 			}));
-			await stopResponse(false);
-			await tick();
+			if (!isAgentRouted(selectedModels)) {
+				await stopResponse(false);
+				await tick();
+			}
 			await submitPrompt(item.prompt, item.files);
 		} catch (error) {
 			toast.error(String(error));
@@ -3506,6 +3545,24 @@
 		if (done) {
 			message.done = true;
 			if (shared) return;
+			if (steerAckIds.has(message.id)) {
+				steerAckIds.delete(message.id);
+				collapseSteerAckShell(message.id);
+				bridge?.update();
+				return;
+			}
+			if (
+				steerInFlight &&
+				message.role === 'assistant' &&
+				!getOutputText(message?.output) &&
+				!removeAllDetails(message?.content ?? '')
+			) {
+				// The ack frame beat its own POST's resolution: still a steer shell.
+				collapseSteerAckShell(message.id);
+				bridge?.update();
+				return;
+			}
+			if (steerQueue.length > 0) steerQueue = [];
 			if (message.error) {
 				dismissContextCompactionToast();
 				bridge?.update();
@@ -3876,6 +3933,31 @@
 
 		if (isGenerating) {
 			if (bridgeRequest) return { status: 'deferred' };
+			if (isAgentRouted(selectedModels) && files.length === 0) {
+				// Steering everywhere (variant A): the running agent-loop turn keeps
+				// running on its own stream; this send posts to the steer route and
+				// shows as a queued note until the run's next turn addresses it.
+				// File-carried sends keep the composer queue — the steer route takes
+				// a message text only.
+				steerQueue = [...steerQueue, { id: uuidv4(), prompt: userPrompt }];
+				messageInput?.setText('');
+				prompt = '';
+				steerInFlight = true;
+				try {
+					await submitPrompt(userPrompt, []);
+				} finally {
+					steerInFlight = false;
+				}
+				// The ack frame can beat the POST's own resolution back to the
+				// browser: collapse the shell here too when it already completed.
+				const steeredCurrentId = history.currentId;
+				if (steeredCurrentId && steeredCurrentId !== lastMessage?.id) {
+					steerAckIds.add(steeredCurrentId);
+					const ackShell = history.messages[steeredCurrentId];
+					if (ackShell?.done) collapseSteerAckShell(steeredCurrentId);
+				}
+				return { status: 'rejected' };
+			}
 			if ($settings?.enableMessageQueue ?? true) {
 				// Enqueue the request
 				const _files = structuredClone(files);
@@ -5291,6 +5373,7 @@
 										{onUpload}
 										{onUpdate}
 										messageQueue={$chatRequestQueues[$chatId] ?? []}
+										{steerQueue}
 										{chatTasks}
 										askUser={savedAskUserPrompt ?? socketAskUserPrompt}
 										onQueueSendNow={sendQueuedMessageNow}
@@ -5388,6 +5471,7 @@
 										{onUpload}
 										{onUpdate}
 										messageQueue={$chatRequestQueues[$chatId] ?? []}
+										{steerQueue}
 										{chatTasks}
 										askUser={savedAskUserPrompt ?? socketAskUserPrompt}
 										onQueueSendNow={sendQueuedMessageNow}
@@ -5444,6 +5528,7 @@
 									{onUpload}
 									{onUpdate}
 									messageQueue={$chatRequestQueues[$chatId] ?? []}
+									{steerQueue}
 									askUser={savedAskUserPrompt ?? socketAskUserPrompt}
 									onQueueSendNow={sendQueuedMessageNow}
 									onQueueEdit={editQueuedMessage}
