@@ -3,6 +3,7 @@
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import CustomParams from './CustomParams.svelte';
+import EffortSelector from './EffortSelector.svelte';
 	import type { i18n as i18nType } from 'i18next';
 	import { getContext } from 'svelte';
 	import type { Writable } from 'svelte/store';
@@ -505,18 +506,7 @@
 		</Tooltip>
 
 		{#if (params?.reasoning_effort ?? null) !== null}
-			<div class="flex mt-0.5 space-x-2">
-				<div class=" flex-1">
-					<input
-						class="text-sm w-full bg-transparent outline-hidden outline-none font-normal text-gray-900 dark:text-gray-100"
-						type="text"
-						aria-label={$i18n.t('settings.personal.general.parameters.reasoningEffort.label')}
-						placeholder={$i18n.t('Enter reasoning effort')}
-						bind:value={params.reasoning_effort}
-						autocomplete="off"
-					/>
-				</div>
-			</div>
+			<EffortSelector bind:value={params.reasoning_effort} />
 		{/if}
 	</div>
 
