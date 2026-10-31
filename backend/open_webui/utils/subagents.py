@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
 import time
 import weakref
 from datetime import timedelta
@@ -42,6 +43,16 @@ MUTATING_MEMORY_TOOLS = {
 }
 
 log = logging.getLogger(__name__)
+
+
+def _dbg(phase: str, **fields) -> None:
+    target = os.environ.get('PR9_DEBUG')
+    if target:
+        import json as _json
+
+        with open(target, 'a') as fh:
+            fh.write(_json.dumps({'phase': phase, **fields}) + '\n')
+
 
 _background_active: set[str] = set()
 _background_lock = asyncio.Lock()
@@ -154,6 +165,7 @@ async def process_pending_internal_messages(
                 )
             ]
             if not pending:
+                _dbg('pending.nothing')
                 return
 
             first = pending[0]
@@ -567,6 +579,10 @@ async def delegate(
             if len(summary) > max_output:
                 summary = f'{summary[:max_output]}\n\n[output truncated]'
             error = message.get('error')
+            # The agent handler stores the turn's error as {'content': <str>};
+            # the report and the tool result want the string itself.
+            if isinstance(error, dict) and isinstance(error.get('content'), str):
+                error = error['content']
             return {
                 'status': 'error' if error else 'completed',
                 'summary': summary or ('Sub-agent produced no output.' if not error else ''),
@@ -601,13 +617,22 @@ async def delegate(
     async def run_background() -> dict:
         started_at = time.time()
         cancelled = False
+        _dbg('run_background.start', child=chat_id[:8])
         try:
             result = await run_reserved()
+            _dbg(
+                'run_reserved.returned',
+                child=chat_id[:8],
+                status=result.get('status'),
+                err=result.get('error'),
+                summary=(result.get('summary') or '')[:60],
+            )
         except asyncio.CancelledError:
             result = {'status': 'interrupted', 'summary': '', 'error': 'cancelled'}
             cancelled = True
         except Exception as exc:
             result = {'status': 'error', 'summary': '', 'error': str(exc)}
+            _dbg('run_reserved.raised', child=chat_id[:8], err=str(exc)[:120])
 
         duration = f'{time.time() - started_at:.1f}s'
         lines = [
@@ -705,6 +730,12 @@ async def delegate(
                 data=pending_message,
             )
 
+        _dbg(
+            'pending.written',
+            child=chat_id[:8],
+            status=pending_message['meta'].get('status'),
+            content=pending_message['content'][:60],
+        )
         if pending_message['meta'].get('status') == 'pending':
             from open_webui.socket.main import sio
 
@@ -719,6 +750,9 @@ async def delegate(
             )
         if not await has_active_tasks(request.app.state.redis, parent_chat_id):
             await process_pending_internal_messages(request, parent_chat_id, user.id, run)
+            _dbg('process_pending.done', child=chat_id[:8])
+        else:
+            _dbg('process_pending.skipped', child=chat_id[:8])
         await _sidecar_child_edge(chat_id, parent_chat_id, mode, delivered=True)
         if cancelled:
             raise asyncio.CancelledError
