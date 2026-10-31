@@ -152,6 +152,8 @@ from open_webui.models.users import Users
 from open_webui.loopback_mcp import router as loopback_mcp_router
 from open_webui.routers.agent_machines import router as agent_machines_router
 from open_webui.routers.agent_runtime import router as agent_runtime_router
+from open_webui.routers.agent_workspace import router as agent_workspace_router
+
 from open_webui.routers import (
     apps,
     analytics,
@@ -918,6 +920,11 @@ app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledg
 app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
 app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
 app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
+
+# Agentic workspace artifacts (PR12): tombstones, restore, and edit history
+# for the four agent-writable families (tool, prompt, skill, knowledge).
+app.include_router(agent_workspace_router, prefix='/api/v1/agent_workspace', tags=['agent_workspace'])
+
 
 app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
 app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
