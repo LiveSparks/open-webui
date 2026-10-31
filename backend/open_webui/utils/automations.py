@@ -54,6 +54,7 @@ log = logging.getLogger(__name__)
 SCHEDULER_POLL_INTERVAL = int(os.getenv('SCHEDULER_POLL_INTERVAL', os.getenv('AUTOMATION_POLL_INTERVAL', '10')))
 TIMER_POLL_INTERVAL = int(os.getenv('TIMER_POLL_INTERVAL', '1'))
 CALENDAR_ALERT_LOOKAHEAD_MINUTES = int(os.getenv('CALENDAR_ALERT_LOOKAHEAD_MINUTES', '10'))
+WORKSPACE_PURGE_INTERVAL = int(os.getenv('WORKSPACE_PURGE_INTERVAL', '3600'))
 
 
 ############################
@@ -83,6 +84,7 @@ async def scheduler_worker_loop(app) -> None:
         SCHEDULER_POLL_INTERVAL,
     )
     next_scheduler_poll = 0.0
+    next_workspace_purge = 0.0
 
     while True:
         try:
@@ -120,6 +122,18 @@ async def scheduler_worker_loop(app) -> None:
                     await _check_calendar_alerts(app)
                 except Exception:
                     log.exception('Scheduler: calendar alert error')
+
+            # ── Workspace tombstone purge ──
+            if now >= next_workspace_purge:
+                next_workspace_purge = now + WORKSPACE_PURGE_INTERVAL
+                try:
+                    from open_webui.models.workspace_tombstones import purge_expired_tombstones
+
+                    purged = await purge_expired_tombstones()
+                    if purged:
+                        log.info('Purged %s expired workspace tombstone(s): %s', len(purged), purged)
+                except Exception:
+                    log.exception('Scheduler: workspace tombstone purge error')
 
         except Exception:
             log.exception('Scheduler worker error')
