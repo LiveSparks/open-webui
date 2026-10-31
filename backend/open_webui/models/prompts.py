@@ -35,6 +35,7 @@ class Prompt(Base):  # versioned template
     tags = Column(JSON, nullable=True)
     is_active = Column(Boolean, default=True)
     version_id = Column(Text, nullable=True)  # Points to active history entry
+    deleted_at = Column(BigInteger, nullable=True, index=True)
     created_at = Column(BigInteger, nullable=True)
     updated_at = Column(BigInteger, nullable=True)
 
@@ -178,7 +179,7 @@ class PromptsTable:
         try:
             async with get_async_db_context(db) as session:
                 result = await session.execute(
-                    select(Prompt).filter_by(id=prompt_id),
+                    select(Prompt).filter_by(id=prompt_id).filter(Prompt.deleted_at.is_(None)),
                 )
                 prompt = result.scalars().first()  # None when not found
                 if not prompt:
@@ -190,7 +191,15 @@ class PromptsTable:
     async def get_prompt_by_command(self, command: str, db: AsyncSession | None = None) -> PromptModel | None:
         """Look up a prompt by its unique slash-command string."""
         async with get_async_db_context(db) as session:
-            match = (await session.execute(select(Prompt).where(Prompt.command == command))).scalars().first()
+            match = (
+                (
+                    await session.execute(
+                        select(Prompt).where(Prompt.command == command).filter(Prompt.deleted_at.is_(None))
+                    )
+                )
+                .scalars()
+                .first()
+            )
             if match is None:
                 return
             return await self._to_prompt_model(match, db=session)
@@ -203,7 +212,9 @@ class PromptsTable:
             active = (
                 (
                     await session.execute(
-                        select(Prompt).where(Prompt.is_active.is_(True)).order_by(Prompt.updated_at.desc())
+                        select(Prompt)
+                        .where(Prompt.is_active.is_(True), Prompt.deleted_at.is_(None))
+                        .order_by(Prompt.updated_at.desc())
                     )
                 )
                 .scalars()
@@ -244,7 +255,11 @@ class PromptsTable:
             user_groups = await Groups.get_groups_by_member_id(user_id, db=session, include_inherited=True)
             user_group_ids = [group.id for group in user_groups]
 
-            query = select(Prompt).filter(Prompt.is_active == True).order_by(Prompt.updated_at.desc())
+            query = (
+                select(Prompt)
+                .filter(Prompt.is_active == True, Prompt.deleted_at.is_(None))
+                .order_by(Prompt.updated_at.desc())
+            )
             query = AccessGrants.has_permission_filter(
                 db=db,
                 query=query,
@@ -297,6 +312,7 @@ class PromptsTable:
         async with get_async_db_context(db) as session:
             # Join with User table for user filtering and sorting
             query = select(Prompt, User).outerjoin(User, User.id == Prompt.user_id)
+            query = query.filter(Prompt.deleted_at.is_(None))
 
             if filter:
                 query_key = filter.get('query')
@@ -424,7 +440,9 @@ class PromptsTable:
             return None
         try:  # database transaction
             async with get_async_db_context(db) as session:
-                result = await session.execute(select(Prompt).filter_by(command=command))
+                result = await session.execute(
+                    select(Prompt).filter_by(command=command).filter(Prompt.deleted_at.is_(None))
+                )
                 prompt = result.scalars().first()
                 if not prompt:
                     return None
@@ -490,7 +508,9 @@ class PromptsTable:
     ) -> PromptModel | None:
         try:
             async with get_async_db_context(db) as session:
-                result = await session.execute(select(Prompt).filter_by(id=prompt_id))
+                result = await session.execute(
+                    select(Prompt).filter_by(id=prompt_id).filter(Prompt.deleted_at.is_(None))
+                )
                 prompt = result.scalars().first()
                 if not prompt:
                     return None
@@ -569,7 +589,9 @@ class PromptsTable:
         """Update only name, command, and tags (no history created)."""
         try:
             async with get_async_db_context(db) as session:
-                result = await session.execute(select(Prompt).filter_by(id=prompt_id))
+                result = await session.execute(
+                    select(Prompt).filter_by(id=prompt_id).filter(Prompt.deleted_at.is_(None))
+                )
                 prompt = result.scalars().first()
                 if not prompt:
                     return None
@@ -596,7 +618,9 @@ class PromptsTable:
         """Set the active version of a prompt and restore content from that version's snapshot."""
         try:
             async with get_async_db_context(db) as session:
-                result = await session.execute(select(Prompt).filter_by(id=prompt_id))
+                result = await session.execute(
+                    select(Prompt).filter_by(id=prompt_id).filter(Prompt.deleted_at.is_(None))
+                )
                 prompt = result.scalars().first()
                 if not prompt:
                     return None
@@ -636,7 +660,9 @@ class PromptsTable:
             return None
         try:  # activation state toggle
             async with get_async_db_context(db) as session:
-                result = await session.execute(select(Prompt).filter_by(id=prompt_id))
+                result = await session.execute(
+                    select(Prompt).filter_by(id=prompt_id).filter(Prompt.deleted_at.is_(None))
+                )
                 prompt = result.scalars().first()
                 if prompt:
                     prompt.is_active = not prompt.is_active
@@ -648,16 +674,16 @@ class PromptsTable:
             return None
 
     async def delete_prompt_by_command(self, command: str, db: AsyncSession | None = None) -> bool:
-        """Permanently delete a prompt and its history."""
+        """Tombstone the prompt; the row and its history survive for restore."""
         try:
             async with get_async_db_context(db) as session:
-                result = await session.execute(select(Prompt).filter_by(command=command))
+                result = await session.execute(
+                    select(Prompt).filter_by(command=command).filter(Prompt.deleted_at.is_(None))
+                )
                 prompt = result.scalars().first()
                 if prompt:
-                    await PromptHistories.delete_history_by_prompt_id(prompt.id, db=session)
-                    await AccessGrants.revoke_all_access('prompt', prompt.id, db=session)
-
-                    await session.delete(prompt)
+                    prompt.deleted_at = int(time.time())
+                    prompt.updated_at = int(time.time())
                     await session.commit()
                     return True
                 return False
@@ -665,10 +691,55 @@ class PromptsTable:
             return False
 
     async def delete_prompt_by_id(self, prompt_id: str, db: AsyncSession | None = None) -> bool:
-        """Permanently delete a prompt and its history."""
+        """Tombstone the prompt; the row and its history survive for restore."""
         try:
             async with get_async_db_context(db) as session:
-                result = await session.execute(select(Prompt).filter_by(id=prompt_id))
+                result = await session.execute(
+                    select(Prompt).filter_by(id=prompt_id).filter(Prompt.deleted_at.is_(None))
+                )
+                prompt = result.scalars().first()
+                if prompt:
+                    prompt.deleted_at = int(time.time())
+                    prompt.updated_at = int(time.time())
+                    await session.commit()
+                    return True
+                return False
+        except Exception as err:
+            log.error(f'Failed to delete prompt: {err}')
+            return False  # deletion failed
+
+    async def restore_prompt_by_id(self, prompt_id: str, db: AsyncSession | None = None) -> PromptModel | None:
+        """Revive a tombstoned prompt; fails when a live prompt holds its command."""
+        try:
+            async with get_async_db_context(db) as session:
+                tombstoned = (
+                    (
+                        await session.execute(
+                            select(Prompt).filter_by(id=prompt_id).filter(Prompt.deleted_at.is_not(None))
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if not tombstoned:
+                    return None
+                collision = await self.get_prompt_by_command(tombstoned.command, db=session)
+                if collision is not None:
+                    return tombstoned  # caller sees a still-tombstoned command collision
+                tombstoned.deleted_at = None
+                tombstoned.updated_at = int(time.time())
+                await session.commit()
+                return await self._to_prompt_model(tombstoned, db=session)
+        except Exception:
+            return None
+
+    async def purge_prompt_by_id(self, prompt_id: str, db: AsyncSession | None = None) -> bool:
+        """Permanently delete a tombstoned prompt and its history (30-day purge)."""
+        try:
+            async with get_async_db_context(db) as session:
+                result = await session.execute(
+                    select(Prompt).filter_by(id=prompt_id).filter(Prompt.deleted_at.is_not(None))
+                )
                 prompt = result.scalars().first()
                 if prompt:
                     await PromptHistories.delete_history_by_prompt_id(prompt.id, db=session)
@@ -679,13 +750,54 @@ class PromptsTable:
                     return True
                 return False
         except Exception as err:
-            log.error(f'Failed to delete prompt: {err}')
-            return False  # deletion failed
+            log.error(f'Failed to purge prompt: {err}')
+            return False  # purge failed
+
+    async def _tombstone_rows(self, user_id: str | None = None, older_than: int | None = None, db=None) -> list[dict]:
+        async with get_async_db_context(db) as session:
+            query = select(Prompt).filter(Prompt.deleted_at.is_not(None))
+            if user_id:
+                query = query.filter(Prompt.user_id == user_id)
+            if older_than is not None:
+                query = query.filter(Prompt.deleted_at < older_than)
+            rows = (await session.execute(query)).scalars().all()
+            return [
+                {'id': row.id, 'name': row.name, 'user_id': row.user_id, 'deleted_at': row.deleted_at} for row in rows
+            ]
+
+    async def _restore_collision(self, item_id: str, db=None) -> bool:
+        """True when a live prompt holds the tombstoned prompt's command."""
+        async with get_async_db_context(db) as session:
+            row = (
+                (await session.execute(select(Prompt).filter_by(id=item_id).filter(Prompt.deleted_at.is_not(None))))
+                .scalars()
+                .first()
+            )
+            if not row:
+                return False
+            live_owner = (
+                (
+                    await session.execute(
+                        select(Prompt).filter_by(command=row.command).filter(Prompt.deleted_at.is_(None))
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            return live_owner is not None
+
+    async def _restore(self, item_id: str, db=None):
+        return await self.restore_prompt_by_id(item_id, db=db)
+
+    async def _purge(self, item_id: str, db=None) -> bool:
+        return await self.purge_prompt_by_id(item_id, db=db)
 
     async def get_tags(self, db: AsyncSession | None = None) -> list[str]:
         try:
             async with get_async_db_context(db) as session:
-                result = await session.execute(select(Prompt.tags).filter(Prompt.is_active == True))
+                result = await session.execute(
+                    select(Prompt.tags).filter(Prompt.is_active == True, Prompt.deleted_at.is_(None))
+                )
                 tags = set()
                 for (tag_list,) in result.all():
                     if tag_list:
@@ -702,7 +814,7 @@ class PromptsTable:
                 user_groups = await Groups.get_groups_by_member_id(user_id, db=session, include_inherited=True)
                 user_group_ids = [group.id for group in user_groups]
 
-                query = select(Prompt.tags).filter(Prompt.is_active == True)
+                query = select(Prompt.tags).filter(Prompt.is_active == True, Prompt.deleted_at.is_(None))
                 query = AccessGrants.has_permission_filter(
                     db=db,
                     query=query,

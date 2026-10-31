@@ -58,6 +58,7 @@ class Knowledge(Base):
 
     created_at = Column(BigInteger)
     updated_at = Column(BigInteger)
+    deleted_at = Column(BigInteger, nullable=True, index=True)
 
 
 class KnowledgeDirectory(Base):
@@ -235,7 +236,9 @@ class KnowledgeTable:
         self, skip: int = 0, limit: int = 30, db: Optional[AsyncSession] = None
     ) -> list[KnowledgeUserModel]:
         async with get_async_db_context(db) as db:
-            result = await db.execute(select(Knowledge).order_by(Knowledge.updated_at.desc()))
+            result = await db.execute(
+                select(Knowledge).filter(Knowledge.deleted_at.is_(None)).order_by(Knowledge.updated_at.desc())
+            )
             all_knowledge = result.scalars().all()
             user_ids = list(set(knowledge.user_id for knowledge in all_knowledge))
             knowledge_ids = [knowledge.id for knowledge in all_knowledge]
@@ -274,6 +277,7 @@ class KnowledgeTable:
         try:
             async with get_async_db_context(db) as db:
                 stmt = select(Knowledge, User).outerjoin(User, User.id == Knowledge.user_id)
+                stmt = stmt.filter(Knowledge.deleted_at.is_(None))
 
                 if filter:
                     query_key = filter.get('query')
@@ -498,7 +502,7 @@ class KnowledgeTable:
     async def get_knowledge_by_id(self, id: str, db: Optional[AsyncSession] = None) -> Optional[KnowledgeModel]:
         try:
             async with get_async_db_context(db) as db:
-                result = await db.execute(select(Knowledge).filter_by(id=id))
+                result = await db.execute(select(Knowledge).filter_by(id=id).filter(Knowledge.deleted_at.is_(None)))
                 knowledge = result.scalars().first()
                 return await self._to_knowledge_model(knowledge, db=db) if knowledge else None
         except Exception:
@@ -511,6 +515,7 @@ class KnowledgeTable:
                     select(Knowledge)
                     .join(KnowledgeFile, Knowledge.id == KnowledgeFile.knowledge_id)
                     .filter(KnowledgeFile.file_id == file_id)
+                    .filter(Knowledge.deleted_at.is_(None))
                 )
                 knowledges = result.scalars().all()
                 knowledge_ids = [k.id for k in knowledges]
@@ -818,7 +823,35 @@ class KnowledgeTable:
             log.exception(e)
             return None
 
+    async def tombstone_knowledge_by_id(self, id: str, db: Optional[AsyncSession] = None) -> bool:
+        """Soft-delete: hide the row, keep the row and its grants for restore."""
+        try:
+            async with get_async_db_context(db) as db:
+                await db.execute(
+                    update(Knowledge).filter_by(id=id).values(deleted_at=int(time.time()), updated_at=int(time.time()))
+                )
+                await db.commit()
+                return True
+        except Exception:
+            return False
+
+    async def restore_knowledge_by_id(self, id: str, db: Optional[AsyncSession] = None) -> Optional[KnowledgeModel]:
+        try:
+            async with get_async_db_context(db) as db:
+                result = await db.execute(select(Knowledge).filter_by(id=id).filter(Knowledge.deleted_at.is_not(None)))
+                knowledge = result.scalars().first()
+                if not knowledge:
+                    return None
+                await db.execute(
+                    update(Knowledge).filter_by(id=id).values(deleted_at=None, updated_at=int(time.time()))
+                )
+                await db.commit()
+                return await self._to_knowledge_model(knowledge, db=db)
+        except Exception:
+            return None
+
     async def delete_knowledge_by_id(self, id: str, db: Optional[AsyncSession] = None) -> bool:
+        """Hard delete: the 30-day purge only, never the user-facing delete."""
         try:
             async with get_async_db_context(db) as db:
                 await AccessGrants.revoke_all_access('knowledge', id, db=db)
@@ -1137,6 +1170,36 @@ class KnowledgeTable:
             except Exception as e:
                 log.exception(e)
                 return False
+
+    async def _tombstone_rows(self, user_id: str | None = None, older_than: int | None = None, db=None) -> list[dict]:
+        async with get_async_db_context(db) as db:
+            query = select(Knowledge).filter(Knowledge.deleted_at.is_not(None))
+            if user_id:
+                query = query.filter(Knowledge.user_id == user_id)
+            if older_than is not None:
+                query = query.filter(Knowledge.deleted_at < older_than)
+            rows = (await db.execute(query)).scalars().all()
+            return [
+                {'id': row.id, 'name': row.name, 'user_id': row.user_id, 'deleted_at': row.deleted_at} for row in rows
+            ]
+
+    async def _restore_collision(self, item_id: str, db=None) -> bool:
+        # The tombstone holds the knowledge id; nothing live can share it.
+        return False
+
+    async def _restore(self, item_id: str, db=None):
+        return await self.restore_knowledge_by_id(item_id, db=db)
+
+    async def _purge(self, item_id: str, db=None) -> bool:
+        # The router delete already purged the row's vectors while the
+        # tombstone lived; a purge of an unrestored tombstone reaps them too.
+        try:
+            from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
+
+            await ASYNC_VECTOR_DB_CLIENT.delete_collection(collection_name=item_id)
+        except Exception:
+            pass
+        return await self.delete_knowledge_by_id(item_id, db=db)
 
 
 Knowledges = KnowledgeTable()
