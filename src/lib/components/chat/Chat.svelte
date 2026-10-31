@@ -3678,22 +3678,23 @@
 		if (done) {
 			message.done = true;
 			if (shared) return;
-			if (steerAckIds.has(message.id)) {
+			const shellTracked = steerAckIds.has(message.id);
+			const shellIsEmpty =
+				!getOutputText(message?.output) && !removeAllDetails(message?.content ?? '');
+			const looksLikeShell =
+				steerInFlight && message.role === 'assistant' && shellIsEmpty;
+			if (shellTracked || looksLikeShell) {
 				steerAckIds.delete(message.id);
-				collapseSteerAckShell(message.id);
-				bridge?.update();
-				return;
-			}
-			if (
-				steerInFlight &&
-				message.role === 'assistant' &&
-				!getOutputText(message?.output) &&
-				!removeAllDetails(message?.content ?? '')
-			) {
-				// The ack frame beat its own POST's resolution: still a steer shell.
-				collapseSteerAckShell(message.id);
-				bridge?.update();
-				return;
+				if (shellIsEmpty) {
+					// The steered turn's own assistant node stays empty (the run's
+					// own stream carries the reply): drop the ack shell so the steer
+					// reads as the queued note it is.
+					collapseSteerAckShell(message.id);
+					bridge?.update();
+					return;
+				}
+				// A steer that met run-end became an ordinary turn (issue 32): its
+				// reply landed in this node, so it completes like any other turn.
 			}
 			if (steerQueue.length > 0) steerQueue = [];
 			if (message.error) {
