@@ -121,6 +121,20 @@ def _selected_direct_tools(metadata: dict) -> list[str]:
     )
 
 
+def _builtin_direct_tools() -> list[str]:
+    """Builtins that ride the binding direct (ADR 0003 as amended).
+
+    The direct-exposure authority is server-side: builtin.py's
+    DIRECT_EXPOSURE_TOOLS is the binding's list; the sidecar constant remains
+    its relay-fallback mirror. The Knowledge-family writers must never hide
+    behind discovery. Names outside this turn's surface simply never appear
+    in tools/list, so an over-broad entry is inert.
+    """
+    from open_webui.tools.builtin import DIRECT_EXPOSURE_TOOLS
+
+    return sorted(DIRECT_EXPOSURE_TOOLS)
+
+
 def mint_session_binding(request: Request, user: Any, metadata: dict, model_id: str | None = None) -> dict:
     """Mint the short-TTL binding for one agent turn.
 
@@ -149,8 +163,10 @@ def mint_session_binding(request: Request, user: Any, metadata: dict, model_id: 
     payload = _b64url(json.dumps(claims, separators=(',', ':')).encode('utf-8'))
     token = f'{payload}.{_signature(payload.encode("ascii"))}'
     # The sidecar declares these names direct; they ride the binding, not the
-    # signed payload, since they steer exposure only.
-    return {'url': loopback_url(request), 'token': token, 'direct': _selected_direct_tools(metadata)}
+    # signed payload, since they steer exposure only. Direct builtins from the
+    # server-side list (the ADR 0003 amendment) join the turn's own selection.
+    direct = {*_selected_direct_tools(metadata), *_builtin_direct_tools()}
+    return {'url': loopback_url(request), 'token': token, 'direct': sorted(direct)}
 
 
 def verify_session_binding(token: str) -> dict:

@@ -102,8 +102,21 @@ from open_webui.tools.builtin import (
     read_skill_file,
     grep_skill_files,
     create_skill,
+    delete_skill,
     update_skill_files,
     write_note,
+    create_prompt,
+    update_prompt,
+    delete_prompt,
+    create_tool,
+    update_tool,
+    delete_tool,
+    create_knowledge,
+    update_knowledge,
+    write_knowledge_file,
+    delete_knowledge_file,
+    delete_knowledge,
+    restore_workspace_item,
 )
 from open_webui.utils.access_control import has_access, has_connection_access, has_permission
 from open_webui.utils.chat_id import is_saved_chat_id, is_temporary_chat_id
@@ -862,7 +875,36 @@ async def get_builtin_tools(
         if user.get('role') == 'admin' or await has_permission(
             user.get('id', ''), 'workspace.skills', await Config.get('user.permissions')
         ):
-            builtin_functions.append(create_skill)
+            builtin_functions.extend([create_skill, delete_skill])
+
+    # Workspace authoring (PR12, ADR 0003): the agent writes the four artifact
+    # kinds under the same gates a human write passes, deleting into 30-day
+    # tombstones. Models stay read-only and Functions stay closed.
+    if is_builtin_tool_enabled('workspace', True):
+        user_permissions_config = await Config.get('user.permissions')
+        prompt_shaper = (
+            user.get('role') == 'admin'
+            or await has_permission(user.get('id', ''), 'workspace.prompts', user_permissions_config)
+            or await has_permission(user.get('id', ''), 'workspace.prompts_import', user_permissions_config)
+        )
+        if prompt_shaper:
+            builtin_functions.extend([create_prompt, update_prompt, delete_prompt])
+        tool_shaper = (
+            user.get('role') == 'admin'
+            or await has_permission(user.get('id', ''), 'workspace.tools', user_permissions_config)
+            or await has_permission(user.get('id', ''), 'workspace.tools_import', user_permissions_config)
+        )
+        if tool_shaper:
+            builtin_functions.extend([create_tool, update_tool, delete_tool])
+        knowledge_shaper = user.get('role') == 'admin' or await has_permission(
+            user.get('id', ''), 'workspace.knowledge', user_permissions_config
+        )
+        if knowledge_shaper:
+            builtin_functions.extend(
+                [create_knowledge, update_knowledge, write_knowledge_file, delete_knowledge_file, delete_knowledge]
+            )
+        if prompt_shaper or tool_shaper or knowledge_shaper:
+            builtin_functions.append(restore_workspace_item)
 
     # Task management - break down complex work into trackable steps
     # Task state is stored on the chats row; local/channel IDs do not have one.
