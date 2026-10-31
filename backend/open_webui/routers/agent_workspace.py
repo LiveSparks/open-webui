@@ -16,9 +16,9 @@ from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.knowledge_history import KnowledgeHistories
 from open_webui.models.workspace_tombstones import (
+    artifact_owner,
     list_tombstones,
     restore_tombstone,
-    tombstone_owner,
 )
 from open_webui.utils.auth import get_admin_user, get_verified_user
 
@@ -27,22 +27,26 @@ router = APIRouter()
 _TOMBSTONE_KINDS = ('tool', 'prompt', 'skill', 'knowledge')
 
 
-async def _restore_authority(kind: str, item_id: str, user) -> None:
-    """Restore rides wherever edit is: owner, explicit write grant, or admin."""
+async def _restore_authority(kind: str, item_id: str, user, permission: str = 'write') -> None:
+    """Restore and history ride wherever their permission reaches: the owner
+    (the row keeps its user through the tombstone and after it), an explicit
+    grant, or admin."""
     if user.role != 'admin':
-        owner = await tombstone_owner(kind, item_id)
+        owner = await artifact_owner(kind, item_id)
         is_owner = owner is not None and owner == user.id
         if not is_owner and not await AccessGrants.has_access(
             user_id=user.id,
             resource_type=kind,
             resource_id=item_id,
-            permission='write',
+            permission=permission,
             db=None,
         ):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail='restore follows edit access; no write grant on the tombstone',
+            detail = (
+                'restore follows edit access; no write grant on the tombstone'
+                if permission == 'write'
+                else 'read access required'
             )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
 
 
 @router.get('/deleted')
@@ -71,17 +75,9 @@ async def get_artifact_history(kind: str, id: str, user=Depends(get_verified_use
     structure and file-operation record that a rollback reverses."""
     if kind not in _TOMBSTONE_KINDS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'unknown artifact kind: {kind}')
-    if not (
-        user.role == 'admin'
-        or await AccessGrants.has_access(
-            user_id=user.id,
-            resource_type=kind,
-            resource_id=id,
-            permission='read',
-            db=None,
-        )
-    ):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='read access required')
+    # The owner reads the artifact's history through this one surface exactly
+    # as the family routes do; tombstoned histories answer the same way.
+    await _restore_authority(kind, id, user, permission='read')
     if kind == 'knowledge':
         return await KnowledgeHistories.get_history_by_knowledge_id(id)
     table_kind = {'tool': 'tool', 'prompt': 'prompt', 'skill': 'skill'}[kind]

@@ -565,7 +565,10 @@ async def delete_skill_by_id(
             detail=ERROR_MESSAGES.UNAUTHORIZED,
         )
 
-    result = await Skills.delete_skill_by_id(id, db=db)
+    # The tombstone flow, exactly like the prompt/tool deletes: the row hides
+    # for 30 days with its files and edit history intact, restorable wherever
+    # edit is; the hard delete below it is the reap only.
+    result = await Skills.tombstone_skill_by_id(id, db=db)
     if result:
         await publish_event(
             request,

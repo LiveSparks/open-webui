@@ -66,6 +66,24 @@ async def tombstone_owner(kind: str, item_id: str, db=None) -> str | None:
     return None
 
 
+async def artifact_owner(kind: str, item_id: str, db=None) -> str | None:
+    """The user id an artifact belongs to, tombstoned or live (the history
+    surface must answer for both states). Tombstoned rows come from the
+    tombstone scan; live ones from each table's own by-id getter, which hides
+    its tombstones, so the two never disagree."""
+    owner = await tombstone_owner(kind, item_id, db=db)
+    if owner is not None:
+        return owner
+    reader = {
+        'tool': 'get_tool_by_id',
+        'prompt': 'get_prompt_by_id',
+        'skill': 'get_skill_by_id',
+        'knowledge': 'get_knowledge_by_id',
+    }[kind]
+    live = await getattr(_table_for(kind), reader)(item_id, db=db)
+    return getattr(live, 'user_id', None)
+
+
 async def restore_tombstone(kind: str, item_id: str, db=None):
     """Revive one tombstone with its history intact; raises HTTPException with a
     404 (no such tombstone) or 409 (would collide with a live artifact)."""

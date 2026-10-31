@@ -1772,7 +1772,11 @@ async def delete_knowledge_by_id(
     # Remove knowledge base embedding
     await remove_knowledge_base_metadata_embedding(id)
 
-    result = await Knowledges.delete_knowledge_by_id(id=id, db=db)
+    # The tombstone flow, exactly like the prompt/tool deletes: the row hides
+    # for 30 days while its files and edit history stay intact and restorable
+    # wherever edit is; the reap (vectors already released above, then the hard
+    # delete) runs on the 30-day scheduler instead of here.
+    result = await Knowledges.tombstone_knowledge_by_id(id=id, db=db)
     if result:
         await publish_event(
             request,
