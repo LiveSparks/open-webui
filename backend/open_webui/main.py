@@ -225,6 +225,7 @@ from open_webui.utils.access_control.folders import has_folder_write_access
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.asgi_middleware import AppHTTPMiddleware
 from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
+from open_webui.utils.agent_loop import agent_loop_model_ids
 from open_webui.utils.auth import (
     create_admin_user,
     decode_token,
@@ -961,6 +962,14 @@ async def get_models(request: Request, refresh: bool = False, user=Depends(get_v
     # Access-filter first so the per-model payload work below only runs for
     # models the caller can actually see.
     models = await get_filtered_models(models, user)
+
+    # The agent-loop marker (PR10): an additive boolean on the entries whose
+    # id the deployment routes through the sidecar loop. The composer's
+    # send-during-generation UI reads it to scope steering to agent models;
+    # absent for every other model.
+    for model in models:
+        if model.get('id') in agent_loop_model_ids():
+            model['agent_loop'] = True
 
     for model in models:
         info = model.get('info') if isinstance(model.get('info'), dict) else {}
