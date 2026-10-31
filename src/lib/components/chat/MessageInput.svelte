@@ -229,6 +229,7 @@
 	let showTerminalMenu = false;
 
 	export let messageQueue: { id: string; prompt: string; files: any[]; error?: string }[] = [];
+	export let steerQueue: { id: string; prompt: string }[] = [];
 	export let onQueueSendNow: (id: string) => void = () => {};
 	export let onQueueEdit: (id: string) => void = () => {};
 	export let onQueueDelete: (id: string) => void = () => {};
@@ -1903,6 +1904,28 @@
 						{#if isActive && chatTasks.length > 0}
 							<div class="mx-1">
 								<TaskList tasks={chatTasks} />
+							</div>
+						{/if}
+
+						<!-- Steered sends (variant A): the running turn keeps going; the
+							notes land after its current step -->
+						{#if steerQueue.length > 0}
+							<div
+								class="mb-1 mx-2 rounded-2xl bg-white dark:bg-gray-900/60 border border-amber-200 dark:border-amber-900/40 overflow-x-hidden"
+							>
+								<div
+									class="flex items-center justify-between gap-2 px-2.5 pt-1 text-[0.6875rem] font-normal text-amber-600 dark:text-amber-400"
+								>
+									<span class="truncate">{$i18n.t('queued · delivered at next turn')}</span>
+									{#if steerQueue.length > 1}
+										<span class="shrink-0 font-mono tabular-nums">{steerQueue.length} queued</span>
+									{/if}
+								</div>
+								{#each steerQueue as note (note.id)}
+									<div class="truncate px-2.5 pb-1 text-xs text-gray-600 dark:text-gray-300">
+										{note.prompt}
+									</div>
+								{/each}
 							</div>
 						{/if}
 
