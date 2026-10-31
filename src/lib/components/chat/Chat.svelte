@@ -3114,7 +3114,10 @@
 	// its ack frame neither clears the notes nor lingers as an empty bubble.
 	let steerQueue: { id: string; prompt: string }[] = [];
 	const steerAckIds = new Set<string>();
-	let steerInFlight = false;
+	// The ack frame can land between the steer POST's own resolution and the
+	// tracking add above; a short window after the last steer marks the empty
+	// completions that are ack shells rather than real turns.
+	let lastSteerAt = 0;
 
 	const isAgentRouted = (modelIds: string[]) =>
 		modelIds.length > 0 &&
@@ -3682,7 +3685,7 @@
 			const shellIsEmpty =
 				!getOutputText(message?.output) && !removeAllDetails(message?.content ?? '');
 			const looksLikeShell =
-				steerInFlight && message.role === 'assistant' && shellIsEmpty;
+				Date.now() - lastSteerAt < 15_000 && message.role === 'assistant' && shellIsEmpty;
 			if (shellTracked || looksLikeShell) {
 				steerAckIds.delete(message.id);
 				if (shellIsEmpty) {
@@ -4076,11 +4079,12 @@
 				steerQueue = [...steerQueue, { id: uuidv4(), prompt: userPrompt }];
 				messageInput?.setText('');
 				prompt = '';
-				steerInFlight = true;
+				lastSteerAt = Date.now();
 				try {
 					await submitPrompt(userPrompt, []);
 				} finally {
-					steerInFlight = false;
+					// Keep the window open for the ack frame that may still be in
+					// flight; the timestamp below bounds it.
 				}
 				// The ack frame can beat the POST's own resolution back to the
 				// browser: collapse the shell here too when it already completed.
