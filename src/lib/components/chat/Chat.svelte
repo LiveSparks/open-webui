@@ -123,6 +123,7 @@
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
+	import RunningSubAgents from '$lib/components/chat/RunningSubAgents.svelte';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import Navbar from '$lib/components/chat/Navbar.svelte';
 	import ChatControls from './ChatControls.svelte';
@@ -166,6 +167,7 @@
 	const eventTarget = new EventTarget();
 
 	let messageInput: MessageInput | undefined;
+	let runningSubAgents: RunningSubAgents | undefined;
 	let messagesRef: Messages | undefined;
 
 	let autoScroll = true;
@@ -1472,6 +1474,12 @@
 	$: syncChatRoom($socket, $chatId, $temporaryChatEnabled);
 
 	const chatEventHandler = async (event, cb) => {
+		// Sub-agent UI (PR10): child chats' events cross the user room; the
+		// running card turns them into rows, console tails, and click-through
+		// targets. Fire-and-forget so the parent's own event path never waits.
+		if (event?.chat_id && event.chat_id !== $chatId) {
+			void runningSubAgents?.handleSocketEvent(event);
+		}
 		if (event?.data?.type === 'chat:presence') {
 			if (!$socket?.connected || event.chat_id !== $chatId || event.chat_id !== joinedChatId)
 				return;
@@ -3113,6 +3121,59 @@
 				($models.find((model) => model.id === modelId) as { agent_loop?: boolean } | undefined)
 					?.agent_loop === true
 		);
+
+	const openSubagentChild = async (childId: string) => {
+		await goto(`/c/${childId}`);
+	};
+
+	// A steered child send rides the child's own loop: the turn persists on the
+	// child's record and a running child session takes the text at its next
+	// step — the same steer route the composer's own send uses. A child that is
+	// not running gets an ordinary new turn, so the card keeps the input
+	// disabled unless the child is live.
+	const steerSubagentChild = async (childId: string, text: string) => {
+		const token = localStorage.token;
+		const record = await getChatById(token, childId);
+		const chatPayload = record?.chat ?? {};
+		const messagesMap = chatPayload.history?.messages ?? {};
+		const leafId = chatPayload.history?.currentId ?? null;
+		const branch = leafId ? createMessagesList({ messages: messagesMap, currentId: leafId }, leafId) : [];
+		const modelId = chatPayload.models?.[0] ?? branch[0]?.model ?? selectedModels[0];
+		if (!modelId) throw new Error('The sub-agent chat has no model.');
+		const userMessage = {
+			id: uuidv4(),
+			parentId: leafId,
+			childrenIds: [],
+			role: 'user',
+			user: { id: $user?.id, name: $user?.name },
+			user_id: $user?.id,
+			content: text,
+			timestamp: Math.floor(Date.now() / 1000),
+			models: [modelId],
+			meta: { internal: record?.meta?.internal === true, type: record?.meta?.type ?? 'subagent' }
+		};
+		const res = await generateOpenAIChatCompletion(
+			token,
+			{
+				model: modelId,
+				messages: [...branch, { role: 'user', content: text }],
+				params: { ...$settings?.params },
+				tool_ids: [],
+				skill_ids: [],
+				filter_ids: [],
+				features: {},
+				variables: {},
+				session_id: $socket?.id,
+				chat_id: childId,
+				id: uuidv4(),
+				parent_id: leafId,
+				user_message: userMessage,
+				background_tasks: {}
+			},
+			`${WEBUI_BASE_URL}/api`
+		);
+		if (!res) throw new Error('The sub-agent did not take the message.');
+	};
 
 	// The steered turn's own assistant node stays empty (the run's own stream
 	// carries the reply): drop the ack shell so the steer reads as the queued
@@ -5329,6 +5390,13 @@
 									</div>
 								{/if}
 							{:else}
+								<RunningSubAgents
+									bind:this={runningSubAgents}
+									chatId={$chatId}
+									{history}
+									onOpenChild={openSubagentChild}
+									onSteerChild={steerSubagentChild}
+								/>
 								<div
 									id={embedded ? messageInputDropzoneId : undefined}
 									class=" pb-2 {dragged ? 'z-0' : 'z-10'}"
@@ -5430,6 +5498,13 @@
 										</div>
 									</div>
 								{/if}
+								<RunningSubAgents
+									bind:this={runningSubAgents}
+									chatId={$chatId}
+									{history}
+									onOpenChild={openSubagentChild}
+									onSteerChild={steerSubagentChild}
+								/>
 								<div id={embedded ? messageInputDropzoneId : undefined} class="pb-2 z-10">
 									<MessageInput
 										{terminalContext}
@@ -5528,7 +5603,6 @@
 									{onUpload}
 									{onUpdate}
 									messageQueue={$chatRequestQueues[$chatId] ?? []}
-									{steerQueue}
 									askUser={savedAskUserPrompt ?? socketAskUserPrompt}
 									onQueueSendNow={sendQueuedMessageNow}
 									onQueueEdit={editQueuedMessage}
