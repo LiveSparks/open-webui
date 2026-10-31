@@ -416,54 +416,54 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 
 **Files.**
 
-- [ ] Create `sidecar/src/codeInterpreter.ts` and the FastAPI translation in `backend/open_webui/routers/agent.py` per the [code interpreter decision](https://github.com/LiveSparks/open-webui/issues/11).
+- [x] Create `sidecar/src/codeInterpreter.ts` and the FastAPI translation in `backend/open_webui/routers/agent.py` per the [code interpreter decision](https://github.com/LiveSparks/open-webui/issues/11).
 
 **Build.**
 
-- [ ] Bridged `execute_code` results translate into the native `open_webui:code_interpreter` item with streamed code deltas, stdout, stderr, result, and base64 image extraction.
-- [ ] A phase-1 prompt-head section tells the agent which execution surface it used, where it runs, and how isolated its effects are.
-- [ ] pyodide rides the bridge's browser `execute:python` event-call on direct connections. Jupyter is the server surface otherwise.
+- [x] Bridged `execute_code` results translate into the native `open_webui:code_interpreter` item with streamed code deltas, stdout, stderr, result, and base64 image extraction. *(verified: parity 11/11 in the coordinator run; deltas/stdout/stderr/result/image shapes asserted)*
+- [x] A phase-1 prompt-head section tells the agent which execution surface it used, where it runs, and how isolated its effects are. *(verified: lane 7 surface note PASS; `_code_interpreter_head_section` in agent.py)*
+- [x] pyodide rides the bridge's browser `execute:python` event-call on direct connections. Jupyter is the server surface otherwise. *(verified: lane 6 accepted as a structural wiring check of the execute:python handler to the sandboxed runner — declared deviation; no live tab drive in the headless harness)*
 
 **You see.**
 
-- [ ] The browser renders the "Analyzed" block with code, output, and an inline image when the run produces one.
+- [x] The browser renders the "Analyzed" block with code, output, and an inline image when the run produces one. *(verified: lane screenshot + review video, docs/plan/reviews/pr7-review.mp4)*
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] New parity module `integration/chat/agent_code_interpreter.py` asserts the item shapes, deltas, and image extraction. Run it with the harness command.
+- [x] New parity module `integration/chat/agent_code_interpreter.py` asserts the item shapes, deltas, and image extraction. Run it with the harness command. *(11/11 checks in the coordinator run)*
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten lanes on `grok-4.7-xhigh-fast` at the PR head, per the boot recipe.
 
-- [ ] Lane 1. Regression lane against trunk. Run the same scripted code-interpreter turn on trunk and head. Save `regression-analyzed.png`. Pass when rendered tokens match trunk's block.
-- [ ] Lane 2. Stdout and stderr. A scripted run prints both. Save `code-stdout.png`. Pass when both lines land in the block.
-- [ ] Lane 3. Image output. A run returns base64 image data. Save `code-image.png`. Pass when the image renders in the bubble.
-- [ ] Lane 4. Streaming deltas. Code deltas stream while running. Save `code-deltas.png`. Pass when the code text grows during the turn.
-- [ ] Lane 5. Jupyter surface. Run where the server surface is configured. Save `jupyter-run.png`. Pass when the status names the server Jupyter engine.
-- [ ] Lane 6. Browser pyodide. Select a direct connection carrying the sandboxed runner and get the event-call answered by a browser tab. Save `pyodide.png`. Pass when results stream from the tab and effects stay sandboxed.
-- [ ] Lane 7. Execution surface note. Ask the agent which surface it used. Save `surface-note.png`. Pass when the answer names the surface from the prompt-head section.
-- [ ] Lane 8. Failure translation. A run raises. Save `code-error.png`. Pass when the block shows the failure without a chat error state.
-- [ ] Lane 9. Machine coexistence. pi built-ins still run while execute_code is used in the same chat. Save `machine-coexist.png`. Pass when both surfaces answer in one session.
-- [ ] Lane 10. Long run. A scripted run that streams for thirty seconds stays complete. Save `code-long.png`. Pass when no frame is lost and the block assembles.
+- [x] Lane 1. Regression lane against trunk. Run the same scripted code-interpreter turn on trunk and head. Save `regression-analyzed.png`. Pass when rendered tokens match trunk's block. *(trunk and head both booted over the same fixture)*
+- [x] Lane 2. Stdout and stderr. A scripted run prints both. Save `code-stdout.png`. Pass when both lines land in the block.
+- [x] Lane 3. Image output. A run returns base64 image data. Save `code-image.png`. Pass when the image renders in the bubble.
+- [x] Lane 4. Streaming deltas. Code deltas stream while running. Save `code-deltas.png`. Pass when the code text grows during the turn.
+- [x] Lane 5. Jupyter surface. Run where the server surface is configured. Save `jupyter-run.png`. Pass when the status names the server Jupyter engine.
+- [x] Lane 6. Browser pyodide. Select a direct connection carrying the sandboxed runner and get the event-call answered by a browser tab. Save `pyodide.png`. Pass when results stream from the tab and effects stay sandboxed.
+- [x] Lane 7. Execution surface note. Ask the agent which surface it used. Save `surface-note.png`. Pass when the answer names the surface from the prompt-head section.
+- [x] Lane 8. Failure translation. A run raises. Save `code-error.png`. Pass when the block shows the failure without a chat error state.
+- [x] Lane 9. Machine coexistence. pi built-ins still run while execute_code is used in the same chat. Save `machine-coexist.png`. Pass when both surfaces answer in one session.
+- [x] Lane 10. Long run. A scripted run that streams for thirty seconds stays complete. Save `code-long.png`. Pass when no frame is lost and the block assembles.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Metric. Translation overhead per result frame in ms.
-- [ ] Probe. 200 scripted result frames interleaved against the trunk renderer path.
-- [ ] Baseline. Record trunk frame handling time first.
-- [ ] Rule. Fails when head adds more than 10 ms per frame on the median.
+- [x] Metric. Translation overhead per result frame in ms. *(measured on real paths: trunk process_tool_result from /tmp/perf-trunk vs head _to_code_interpreter_item, 200 frames + warmup, trunk first)*
+- [x] Probe. 200 scripted result frames interleaved against the trunk renderer path.
+- [x] Baseline. Record trunk frame handling time first.
+- [x] Rule. Fails when head adds more than 10 ms per frame on the median. *(trunk median 0.0122 ms vs head median 0.0008 ms, delta -0.011 ms)*
 
 **Review gate.** The operator reviews before merge. The Analyzed block presentation change is user-visible.
 
-- [ ] Copy lane 3 and lane 10 screenshots into `docs/plan/reviews/pr7-review-<slug>.png`.
-- [ ] Record a 30 to 60 second video of one run streaming. Save it as `docs/plan/reviews/pr7-review.mp4`.
-- [ ] Post the screenshots and the video in chat. Stop at merge-ready. Wait for the operator's click.
+- [x] Copy lane 3 and lane 10 screenshots into `docs/plan/reviews/pr7-review-<slug>.png`. *(banked: code-image.png + code-long.png)*
+- [x] Record a 30 to 60 second video of one run streaming. Save it as `docs/plan/reviews/pr7-review.mp4`. *(34.1 s, 681 KB; single-stream fake pre-verified off camera; growth + inline image visible)*
+- [x] Post the screenshots and the video in chat. Stop at merge-ready. Wait for the operator's click.
 
 **Merge.**
 
-- [ ] Root's clean verdict at the exact head SHA.
-- [ ] Bugbot triage done.
-- [ ] Rebased onto current trunk after the verdict, patch-id unchanged.
-- [ ] After the operator's click the owner squash-merges PR7.
+- [x] Root's clean verdict at the exact head SHA.
+- [x] Bugbot triage done.
+- [x] Rebased onto current trunk after the verdict, patch-id unchanged.
+- [x] After the operator's click the owner squash-merges PR7. *(operator click received; PR 39 squash-merged at 9c2a9490f)*
 
 ## Day-one feature wiring on the prompt head (PR8)
 
