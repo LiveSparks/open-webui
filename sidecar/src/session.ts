@@ -194,6 +194,11 @@ interface ChatEntry {
 	bridge: BridgeControl;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
 	abortRequested: boolean;
+	/** Set before the entry's session is disposed. An in-flight run that
+	 * resolves afterwards (a sidecar shutdown or a host rebuild aborts pi
+	 * silently, but pi still lets prompt() settle) did not finish: report
+	 * it as a failure, never as a quiet completion of partial output. */
+	disposed?: boolean;
 	/** The per-turn model/key/header handoff (PR6); bound when the session carries a loopback binding. */
 	turn: TurnController | undefined;
 	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
@@ -404,6 +409,7 @@ export class SessionRegistry {
 	private evict(chatId: string, entry: ChatEntry): void {
 		this.chats.delete(chatId);
 		this.evictedSinceBoot += 1;
+		entry.disposed = true;
 		try {
 			entry.session.dispose();
 		} catch {
@@ -446,6 +452,7 @@ export class SessionRegistry {
 				// The machine selection changed presence between turns: pi's custom
 				// tool list is fixed per session, so rebuild from the JSONL (the
 				// proven resume path). Not an eviction; every turn stays hosted.
+				existing.disposed = true;
 				existing.session.dispose();
 				this.chats.delete(chatId);
 			} else {
@@ -712,19 +719,23 @@ export class SessionRegistry {
 			dropIncompleteGate(entry);
 			entry.lastTurnEndedAt = Date.now();
 		}
+		const runDisposed = Boolean(entry.disposed) && !entry.abortRequested;
 		const reason: PromptResult["reason"] =
-			entry.abortRequested || lastStopReason === "aborted"
-				? "aborted"
-				: turnCap.fired()
-					? "error"
-					: lastStopReason === "error"
+			runDisposed
+				? "error"
+				: entry.abortRequested || lastStopReason === "aborted"
+					? "aborted"
+					: turnCap.fired()
 						? "error"
-						: "completed";
+						: lastStopReason === "error"
+							? "error"
+							: "completed";
 		return {
 			reason,
 			sessionId: entry.session.sessionId,
 			assistantText: entry.session.getLastAssistantText(),
 			sessionFile: entry.session.sessionFile,
+			...(runDisposed ? { error: "Agent sidecar is shutting down." } : {}),
 			...(turnCap.fired() ? { error: turnCap.fired() as string } : {}),
 		};
 	}
@@ -759,6 +770,7 @@ export class SessionRegistry {
 
 	async disposeAll(): Promise<void> {
 		for (const entry of this.chats.values()) {
+			entry.disposed = true;
 			entry.session.dispose();
 		}
 		this.chats.clear();
