@@ -1918,7 +1918,7 @@
 								>
 									<span class="truncate">{$i18n.t('queued · delivered at next turn')}</span>
 									{#if steerQueue.length > 1}
-										<span class="shrink-0 font-mono tabular-nums">+{steerQueue.length - 1}</span>
+										<span class="shrink-0 font-mono tabular-nums">{steerQueue.length} queued</span>
 									{/if}
 								</div>
 								{#each steerQueue as note (note.id)}
