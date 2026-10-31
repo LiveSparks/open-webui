@@ -3264,7 +3264,10 @@
 			(childId: string) => childId !== messageId
 		);
 		delete history.messages[messageId];
-		history.currentId = steerParentId;
+		// Current goes back to the steer user message's own parent (the running
+		// turn), so a further send during the run still steers instead of taking
+		// the shell's done state for a quiet chat.
+		history.currentId = steerParent.parentId ?? steerParentId;
 		history = history;
 	};
 
