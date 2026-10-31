@@ -159,24 +159,42 @@ async def stream_sidecar_events(
     message: str,
     tool_approval: str = 'full',
     turn: dict | None = None,
+    max_turns: int | None = None,
 ) -> AsyncIterator[tuple[str, dict]]:
     """Yield `(event, data)` frames from the sidecar prompt SSE stream."""
+    # A sub-agent child spawn carries its assistant-turn budget (PR9, issue
+    # 18): the sidecar realizes it as a finishTurn hook. Parent turns carry
+    # none and stay uncapped, as today.
+    body: dict = {
+        'message': message,
+        'toolApproval': tool_approval,
+        **({'turn': turn} if turn else {}),
+        **({'maxTurns': max_turns} if max_turns else {}),
+    }
     async with client.stream(
         'POST',
         f'/sessions/{chat_id}/prompt',
-        json={'message': message, 'toolApproval': tool_approval, **({'turn': turn} if turn else {})},
+        json=body,
         timeout=None,
     ) as response:
         if response.status_code >= 400:
             body = (await response.aread()).decode('utf-8', 'replace')
             raise HTTPException(status_code=response.status_code, detail=body)
         event_name = ''
+        # The prompt stream always closes with the `done` result frame (an
+        # `error` frame only on an outright refusal): a clean EOF without
+        # either means the sidecar died mid-run, and the turn must surface
+        # as failed, never as a quietly completed partial answer.
+        saw_done = False
+        saw_error = False
         async for line in response.aiter_lines():
             if not line:
                 event_name = ''
                 continue
             if line.startswith('event:'):
                 event_name = line.removeprefix('event:').strip()
+                saw_done = saw_done or event_name == 'done'
+                saw_error = saw_error or event_name == 'error'
                 continue
             if line.startswith('data:'):
                 try:
@@ -184,6 +202,8 @@ async def stream_sidecar_events(
                 except json.JSONDecodeError:
                     continue
                 yield (event_name or 'message'), data
+        if not (saw_done or saw_error):
+            raise HTTPException(status_code=502, detail='agent sidecar disconnected mid-run')
 
 
 # ---------------------------------------------------------------------------
@@ -577,10 +597,14 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
 
         turn = await build_turn_envelope(request, user, form_data, metadata)
 
+        max_turns = getattr(request.state, 'max_tool_call_iterations', None)
+
         async def sse_stream() -> AsyncIterator[str]:
             translator = PiEventTranslator()
             try:
-                async for event, data in stream_sidecar_events(client, chat_id, prompt_text, tool_approval, turn):
+                async for event, data in stream_sidecar_events(
+                    client, chat_id, prompt_text, tool_approval, turn, max_turns
+                ):
                     async for line in translator.translate(event, data):
                         yield line
                     for line in translator.flush_lines():
@@ -755,6 +779,15 @@ async def agent_chat_response_handler(response: StreamingResponse, ctx: dict):
             log.exception('agent bridge: response stream snapshot failed')
 
     async def persist_error(error_content: Any) -> None:
+        # The translator frames a failed run as {'content': <string>} (and a
+        # stream refusal carries the same shape on e.detail); the caller that
+        # stores an error expects the string itself, so a nested dict would
+        # render wrong in the chat record and in every error.content reader.
+        if isinstance(error_content, dict):
+            inner = error_content.get('content')
+            error_content = (
+                inner if isinstance(inner, str) else json.dumps(inner if inner is not None else error_content)
+            )
         if save_to_chat:
             await Chats.upsert_message_to_chat_by_id_and_message_id(
                 metadata['chat_id'], metadata['message_id'], {'error': {'content': error_content}}

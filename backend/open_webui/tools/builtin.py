@@ -1709,6 +1709,17 @@ async def delegate_task(
         return 'Error: request context not available.'
     if getattr(__request__.state, 'internal', False) is True:
         return 'Error: sub-agents cannot delegate recursively.'
+    # The recursion ban fails closed at the chat itself (PR9, issue 10): a
+    # sub-agent child chat never delegates, whichever route the call arrived
+    # on. The bridge carries the same ban by leaving the tool out of the
+    # child's tool set entirely.
+    if __chat_id__:
+        from open_webui.models.chats import Chats
+
+        chat = await Chats.get_chat_by_id(__chat_id__)
+        meta = (chat.meta or {}) if chat else {}
+        if meta.get('internal') is True and meta.get('type') == 'subagent':
+            return 'Error: sub-agents cannot delegate recursively.'
 
     from open_webui.utils.subagents import delegate
 

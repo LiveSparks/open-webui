@@ -22,6 +22,7 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
+import type { AgentTurnDecision } from "@earendil-works/pi-agent-core";
 import type { SidecarConfig } from "./config.ts";
 import { validateChatId, type LoopbackBinding } from "./config.ts";
 import { buildMachineTools, machineChatRoot } from "./machineTools.ts";
@@ -193,6 +194,11 @@ interface ChatEntry {
 	bridge: BridgeControl;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
 	abortRequested: boolean;
+	/** Set before the entry's session is disposed. An in-flight run that
+	 * resolves afterwards (a sidecar shutdown or a host rebuild aborts pi
+	 * silently, but pi still lets prompt() settle) did not finish: report
+	 * it as a failure, never as a quiet completion of partial output. */
+	disposed?: boolean;
 	/** The per-turn model/key/header handoff (PR6); bound when the session carries a loopback binding. */
 	turn: TurnController | undefined;
 	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
@@ -201,7 +207,9 @@ interface ChatEntry {
 	lastUsedSeq: number;
 	/** When the last prompt() finished; the idle-TTL clock starts here. */
 	lastTurnEndedAt: number;
-	/** PR9 sets this for background child sessions; a parent never evicts while it is true. */
+	/** Sub-agent children (PR9, issue 29): a parent is never evicted while an
+	 * undelivered child it spawned is still owed a result; the registry
+	 * resolves the guard against the parent-child edges, not the entry. */
 	hasBackgroundChildren: () => boolean;
 }
 
@@ -217,6 +225,11 @@ export interface PromptOptions {
 	toolApproval?: "ask" | "full";
 	/** The turn's resolved model/key/header envelope, pushed fresh by the backend (PR6). */
 	turn?: TurnEnvelope;
+	/** Assistant-turn budget for this run (PR9, issue 18): a child's
+	 * `subagents.max_iterations` rides the prompt as `maxTurns`, and a
+	 * finishTurn hook ends the loop when the count is reached. Absent means no
+	 * cap; the parent loop stays uncapped as today. */
+	maxTurns?: number;
 }
 
 export type SessionEventHandler = (event: unknown) => void;
@@ -272,10 +285,52 @@ function readMaxLoadedSessions(): number {
 	return Number.isFinite(parsed) && parsed >= 1 ? parsed : MAX_LOADED_SESSIONS_DEFAULT;
 }
 
+interface ChildEdge {
+	parent: string;
+	mode: "foreground" | "background";
+}
+
 export class SessionRegistry {
 	private readonly chats = new Map<string, ChatEntry>();
+	/** Delegations spawned and not yet delivered, keyed by child chat id
+	 * (PR9, issues 18 and 29): the delegation caller registers the edge at
+	 * spawn and marks it delivered once the child's result landed, so a queued
+	 * child and the parent waiting on a background result cannot be evicted
+	 * in between. */
+	private readonly pendingChildren = new Map<string, ChildEdge>();
 	private evictedSinceBoot = 0;
 	private usedSeq = 0;
+
+	registerChildEdge(childId: string, parent: string, mode: "foreground" | "background"): void {
+		validateChatId(childId);
+		validateChatId(parent);
+		this.pendingChildren.set(childId, { parent, mode });
+	}
+
+	markChildDelivered(childId: string): void {
+		this.pendingChildren.delete(childId);
+	}
+
+	isUndeliveredChild(chatId: string): boolean {
+		return this.pendingChildren.has(chatId);
+	}
+
+	hasUndeliveredChildren(parentChatId: string): boolean {
+		for (const edge of this.pendingChildren.values()) {
+			if (edge.parent === parentChatId) return true;
+		}
+		return false;
+	}
+
+	/** The child and parent ids a sweep may not touch right now. */
+	private guardedChatIds(): Set<string> {
+		const guarded = new Set<string>();
+		for (const [child, edge] of this.pendingChildren) {
+			guarded.add(child);
+			guarded.add(edge.parent);
+		}
+		return guarded;
+	}
 	private readonly sweeper: ReturnType<typeof setInterval>;
 
 	constructor(
@@ -311,8 +366,14 @@ export class SessionRegistry {
 	 */
 	sweep(now = Date.now()): number {
 		let evicted = 0;
+		const guarded = this.guardedChatIds();
 		for (const [chatId, entry] of this.chats) {
-			if (entry.state !== "running" && !entry.hasBackgroundChildren() && now - entry.lastTurnEndedAt >= this.idleTtlMs) {
+			if (
+				entry.state !== "running" &&
+				!guarded.has(chatId) &&
+				!entry.hasBackgroundChildren() &&
+				now - entry.lastTurnEndedAt >= this.idleTtlMs
+			) {
 				this.evict(chatId, entry);
 				evicted += 1;
 			}
@@ -325,10 +386,14 @@ export class SessionRegistry {
 	 * progress), skipping guarded sessions. */
 	private enforceCap(reserve = 0): number {
 		let evicted = 0;
+		const guarded = this.guardedChatIds();
 		while (this.chats.size + reserve > this.maxLoadedSessions) {
 			const candidate = [...this.chats.entries()]
 				.sort((a, b) => a[1].lastUsedSeq - b[1].lastUsedSeq)
-				.find(([, entry]) => entry.state !== "running" && !entry.hasBackgroundChildren());
+				.find(
+					([chatId, entry]): boolean =>
+						entry.state !== "running" && !guarded.has(chatId) && !entry.hasBackgroundChildren(),
+				);
 			if (!candidate) break;
 			this.evict(candidate[0], candidate[1]);
 			evicted += 1;
@@ -344,6 +409,7 @@ export class SessionRegistry {
 	private evict(chatId: string, entry: ChatEntry): void {
 		this.chats.delete(chatId);
 		this.evictedSinceBoot += 1;
+		entry.disposed = true;
 		try {
 			entry.session.dispose();
 		} catch {
@@ -386,6 +452,7 @@ export class SessionRegistry {
 				// The machine selection changed presence between turns: pi's custom
 				// tool list is fixed per session, so rebuild from the JSONL (the
 				// proven resume path). Not an eviction; every turn stays hosted.
+				existing.disposed = true;
 				existing.session.dispose();
 				this.chats.delete(chatId);
 			} else {
@@ -459,7 +526,7 @@ export class SessionRegistry {
 			lastUsedAt: now,
 			lastUsedSeq: this.touch(),
 			lastTurnEndedAt: now,
-			hasBackgroundChildren: () => false,
+			hasBackgroundChildren: () => this.hasUndeliveredChildren(chatId),
 		};
 		this.chats.set(chatId, entry);
 		return entry;
@@ -583,7 +650,7 @@ export class SessionRegistry {
 		chatId: string,
 		text: string,
 		onEvent: SessionEventHandler,
-		options?: { toolApproval?: "ask" | "full"; turn?: TurnEnvelope },
+		options?: PromptOptions,
 	): Promise<PromptResult> {
 		const entry = this.chats.get(chatId);
 		if (!entry) {
@@ -606,6 +673,7 @@ export class SessionRegistry {
 		entry.lastUsedAt = Date.now();
 		entry.lastUsedSeq = this.touch();
 		let lastStopReason: string | undefined;
+		const turnCap = installTurnCap(entry.session, options?.maxTurns);
 		try {
 			// Apply the turn's resolved model/key/header envelope (PR6): every
 			// turn resolves fresh, so a model switch or a rotated key is simply
@@ -647,20 +715,28 @@ export class SessionRegistry {
 			return result;
 		} finally {
 			entry.state = "idle";
+			turnCap.release();
 			dropIncompleteGate(entry);
 			entry.lastTurnEndedAt = Date.now();
 		}
+		const runDisposed = Boolean(entry.disposed) && !entry.abortRequested;
 		const reason: PromptResult["reason"] =
-			entry.abortRequested || lastStopReason === "aborted"
-				? "aborted"
-				: lastStopReason === "error"
-					? "error"
-					: "completed";
+			runDisposed
+				? "error"
+				: entry.abortRequested || lastStopReason === "aborted"
+					? "aborted"
+					: turnCap.fired()
+						? "error"
+						: lastStopReason === "error"
+							? "error"
+							: "completed";
 		return {
 			reason,
 			sessionId: entry.session.sessionId,
 			assistantText: entry.session.getLastAssistantText(),
 			sessionFile: entry.session.sessionFile,
+			...(runDisposed ? { error: "Agent sidecar is shutting down." } : {}),
+			...(turnCap.fired() ? { error: turnCap.fired() as string } : {}),
 		};
 	}
 
@@ -694,6 +770,7 @@ export class SessionRegistry {
 
 	async disposeAll(): Promise<void> {
 		for (const entry of this.chats.values()) {
+			entry.disposed = true;
 			entry.session.dispose();
 		}
 		this.chats.clear();
@@ -715,6 +792,57 @@ export class SessionRegistry {
 }
 
 const DEFAULT_SYSTEM_PROMPT = "You are the Open WebUI chat agent. Answer directly and concisely.";
+
+/** The assistant-turn budget message when a run's finishTurn cap fires (PR9,
+ * issue 18): trunk's Python loop reports exactly this string, and the
+ * translated stream records it on the child's own stored message. */
+function turnLimitError(maxTurns: number): string {
+	return `Tool-call limit reached (${maxTurns} iterations).`;
+}
+
+interface TurnCap {
+	/** The limit message when the cap fired this run, else false. */
+	fired(): string | false;
+	release(): void;
+}
+
+/** Wrap the session's finishTurn chain with an assistant-turn counter. A cap
+ * that is absent, not an integer, or 0 is no cap. On the hit turn the
+ * wrapper ends the run without polling queues, so the loop stops where the
+ * native loop stops; the wrapper restores the chain after the run. */
+function installTurnCap(session: AgentSession, maxTurns: number | undefined): TurnCap {
+	if (!maxTurns || !Number.isInteger(maxTurns) || maxTurns <= 0) {
+		return { fired: () => false, release: () => undefined };
+	}
+	const agent = session.agent;
+	const previous = agent.finishTurn;
+	let turns = 0;
+	let fired: string | false = false;
+	agent.finishTurn = async (turn, signal): Promise<AgentTurnDecision | undefined> => {
+		const content = turn.message.content ?? [];
+		const toolCalls = Array.isArray(content)
+			? content.filter((part) => (part as { type?: string })?.type === "toolCall")
+			: [];
+		if (toolCalls.length === 0) {
+			// A terminal turn ends the loop on its own: the counter counts the
+			// tool-call rounds the native loop counts, not every assistant turn.
+			return (await previous?.(turn, signal)) ?? undefined;
+		}
+		turns += 1;
+		const decision = (await previous?.(turn, signal)) ?? undefined;
+		if (turns >= maxTurns) {
+			if (!fired) fired = turnLimitError(maxTurns);
+			return { action: "end" };
+		}
+		return decision;
+	};
+	return {
+		fired: () => fired,
+		release: () => {
+			agent.finishTurn = previous;
+		},
+	};
+}
 
 /**
  * The approval gate extension: one inline extension per session. In 'ask'

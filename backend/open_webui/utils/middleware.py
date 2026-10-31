@@ -2411,6 +2411,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             log.debug('Excluded external plugins disabled by plugin configuration')
         terminal_id = None
         metadata['tool_servers'] = None
+    elif not terminal_id:
+        # Fall back to the model's pinned terminal so tool resolution and agent
+        # binding stay consistent (agent bridge already uses this fallback).
+        from open_webui.utils.terminals import pinned_model_terminal
+
+        terminal_id = await pinned_model_terminal(request, model.get('id'))
     files = form_data.pop('files', None)
     form_data.pop('folder_id', None)
     metadata['terminal_id'] = terminal_id

@@ -147,6 +147,10 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 					return handleAbort(chatId, res);
 				case "fork":
 					return handleFork(chatId, req, res);
+				case "child":
+					return handleChild(chatId, req, res);
+				case "delivered":
+					return handleDelivered(chatId, res);
 				default:
 					writeJson(res, 404, { ok: false, error: `unknown route ${url.pathname}` });
 			}
@@ -223,6 +227,12 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 		const toolApproval = body["toolApproval"] === "ask" ? "ask" : "full";
 		// The turn's resolved model/key/header envelope (PR6, issues 22/23).
 		const turn = parseTurnEnvelope(body["turn"]);
+		// The delegation's assistant-turn budget (PR9, issue 18): the child's
+		// spawn carries `subagents.max_iterations` as maxTurns; a non-positive
+		// or absent field is no cap.
+		const rawMaxTurns = body["maxTurns"];
+		const maxTurns =
+			typeof rawMaxTurns === "number" && Number.isInteger(rawMaxTurns) && rawMaxTurns > 0 ? rawMaxTurns : undefined;
 
 		writeSseHead(res);
 		const onEvent = (event: unknown) => {
@@ -239,7 +249,7 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 
 		let result;
 		try {
-			result = await registry.prompt(chatId, message, onEvent, { toolApproval, turn });
+			result = await registry.prompt(chatId, message, onEvent, { toolApproval, turn, maxTurns });
 		} catch (error) {
 			if (error instanceof SessionConflictError) {
 				writeSseFrame(res, "error", { ok: false, error: error.message });
@@ -302,6 +312,23 @@ export function createHttpSurface(deps: HttpDeps): HttpSurface {
 			}
 			throw error;
 		}
+	}
+
+	/** Register a delegation the backend just spawned (PR9, issue 29): the
+	 * child and the parent that awaits its result stay immune to the sweep
+	 * until delivered posts. Admission is bookkeeping, not a session lookup:
+	 * a queued child may not have a session yet. */
+	async function handleChild(chatId: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+		const body = await readJsonBody(req);
+		const parent = requireString(body, "parent");
+		const mode = body["mode"] === "background" ? "background" : "foreground";
+		registry.registerChildEdge(chatId, parent, mode);
+		writeJson(res, 200, { ok: true, chatId, parent, mode });
+	}
+
+	async function handleDelivered(chatId: string, res: http.ServerResponse): Promise<void> {
+		registry.markChildDelivered(chatId);
+		writeJson(res, 200, { ok: true, chatId });
 	}
 
 	async function handleAbort(chatId: string, res: http.ServerResponse): Promise<void> {
