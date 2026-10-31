@@ -140,6 +140,9 @@ def mint_session_binding(request: Request, user: Any, metadata: dict, model_id: 
         'tool_ids': metadata.get('tool_ids') or [],
         'files': metadata.get('files') or [],
         'features': metadata.get('features') or {},
+        # The selected machine a delegation carries to its child runs (PR9):
+        # claims, not the direct list, because tools re-resolve from claims.
+        'terminal_id': (metadata.get('terminal_id') or '') if isinstance(metadata, dict) else '',
         'iat': now,
         'exp': now + BINDING_TTL_S,
     }
@@ -253,6 +256,14 @@ async def resolve_bridge_tools(request: Request, claims: dict) -> tuple[dict[str
         'session_id': claims.get('session_id') or '',
         'model_id': model_id,
         'files': claims.get('files') or [],
+        # The rest of the turn envelope the native loop built: a delegation
+        # (PR9, issue 10) reconstructs its child run from this metadata, so
+        # the child inherits the turn's tool selection, the feature-gated
+        # tool families, and the selected machine the caller reached the
+        # bridge with, not an empty surface.
+        'tool_ids': claims.get('tool_ids') or [],
+        'features': claims.get('features') or {},
+        'terminal_id': claims.get('terminal_id') or '',
     }
     event_emitter, event_caller = await get_event_emitter_and_caller(metadata)
     extra_params = {
