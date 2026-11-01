@@ -272,6 +272,12 @@ async def resolve_bridge_tools(request: Request, claims: dict) -> tuple[dict[str
         'message_id': claims.get('message_id') or '',
         'session_id': claims.get('session_id') or '',
         'model_id': model_id,
+        # The owning user the event callers scope their targets with: the native
+        # loop carries `user_id` on this same metadata, and socket/main.py's
+        # emitter closes over it and the caller checks the session against it —
+        # without it a live tab's own relay refuses as 'Client session
+        # disconnected.' (PR13, the browser-relay leg).
+        'user_id': user.id,
         'files': claims.get('files') or [],
         # The rest of the turn envelope the native loop built: a delegation
         # (PR9, issue 10) reconstructs its child run from this metadata, so
