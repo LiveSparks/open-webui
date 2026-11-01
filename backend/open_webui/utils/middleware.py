@@ -2181,6 +2181,17 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     )
     form_data['messages'] = sanitize_tool_pairs(form_data['messages'])
 
+    # The spoken-transcript merge rides the per-turn handoff (PR8): the merge
+    # landed the chain's historical voice transcripts as messages the agent
+    # dispatch would drop with the rest of the history it omits (pi's session
+    # owns it), so agent-loop turns gather them onto the turn instead.
+    from open_webui.routers.agent import is_agent_model
+
+    if not metadata.get('task') and is_agent_model(form_data.get('model') or ''):
+        from open_webui.utils.voice import merge_voice_transcripts_into_turn
+
+        form_data['messages'] = merge_voice_transcripts_into_turn(form_data['messages'])
+
     system_message = get_system_message(form_data.get('messages', []))
     if system_message:  # Chat Controls/User Settings
         try:
@@ -2805,11 +2816,19 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     }
 
         if terminal_id and terminal_capability:
+            from open_webui.routers.agent import is_agent_model
             from open_webui.utils.terminals import add_terminal_agents_md, get_terminal_agents_md
 
             agents_md = await get_terminal_agents_md(request, user, metadata, extra_params)
             if agents_md:
-                form_data['messages'] = add_terminal_agents_md(form_data['messages'], agents_md)
+                if is_agent_model(model.get('id', '')):
+                    # The file instructions ride the head on the agent loop
+                    # (PR8): trunk inserts AGENTS.md as the user message before
+                    # the first user turn, and the agent dispatch only prompts
+                    # the new turn, so the insert would never reach pi.
+                    form_data['messages'] = add_or_update_system_message(agents_md, form_data['messages'], append=True)
+                else:
+                    form_data['messages'] = add_terminal_agents_md(form_data['messages'], agents_md)
 
         if mcp_clients:
             metadata['mcp_clients'] = mcp_clients
