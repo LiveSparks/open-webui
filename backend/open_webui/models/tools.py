@@ -34,6 +34,7 @@ class Tool(Base):  # database table definition
 
     updated_at = Column(BigInteger, nullable=False)  # modification timestamp
     created_at = Column(BigInteger, index=True)  # creation timestamp
+    deleted_at = Column(BigInteger, nullable=True, index=True)
 
 
 class ToolMeta(BaseModel):
@@ -195,7 +196,7 @@ class ToolsTable:
         try:  # single PK lookup + access grants
             async with get_async_db_context(db) as session:
                 tool = await session.get(Tool, id)
-                if not tool:
+                if not tool or tool.deleted_at is not None:
                     return None
                 return await self._to_tool_model(tool, db=session)
         except Exception:
@@ -206,7 +207,7 @@ class ToolsTable:
         if not tool_ids:
             return {}
         async with get_async_db_context(db) as db:
-            result = await db.execute(select(Tool).where(Tool.id.in_(tool_ids)))
+            result = await db.execute(select(Tool).where(Tool.id.in_(tool_ids), Tool.deleted_at.is_(None)))
             tools = result.scalars().all()
             grants_map = await AccessGrants.get_grants_by_resources('tool', [tool.id for tool in tools], db=db)
             return {
@@ -225,7 +226,7 @@ class ToolsTable:
         async with get_async_db_context(db) as db:
             # Skip Tool.content (plugin source, potentially large) via a
             # column select; Row attributes satisfy from_attributes.
-            stmt = (
+            selected = (
                 select(
                     Tool.id,
                     Tool.version_id,
@@ -238,7 +239,8 @@ class ToolsTable:
                 )
                 if defer_content
                 else select(Tool)
-            ).order_by(Tool.updated_at.desc())
+            )
+            stmt = selected.filter(Tool.deleted_at.is_(None)).order_by(Tool.updated_at.desc())
 
             if user_id is not None:
                 if user_group_ids is None:
@@ -370,7 +372,7 @@ class ToolsTable:
         async with get_async_db_context(db) as session:
             try:
                 tool = await self._lock_tool(session, id)
-                if not tool:
+                if not tool or tool.deleted_at is not None:
                     raise ValueError('Tool not found')
                 if not allow_code_changes and updated.get('content', tool.content) != tool.content:
                     raise HTTPException(401, 'You do not have permission to change executable Tool code')
@@ -394,7 +396,40 @@ class ToolsTable:
                 await session.rollback()
                 raise
 
+    async def tombstone_tool_by_id(self, id, db=None) -> bool:
+        """Soft-delete: hide the row, keep it and its history for restore."""
+        async with get_async_db_context(db) as session:
+            try:
+                await self._lock_tool(session, id)
+                tool = await session.get(Tool, id, populate_existing=True)
+                if not tool or tool.deleted_at is not None:
+                    return False
+                tool.deleted_at = int(time.time())
+                tool.updated_at = int(time.time())
+                await session.commit()
+                return True
+            except Exception:
+                await session.rollback()
+                return False
+
+    async def restore_tool_by_id(self, id, db=None):
+        """Revive a tombstoned tool with its history intact."""
+        async with get_async_db_context(db) as session:
+            try:
+                await self._lock_tool(session, id)
+                tool = await session.get(Tool, id, populate_existing=True)
+                if not tool or tool.deleted_at is None:
+                    return None
+                tool.deleted_at = None
+                tool.updated_at = int(time.time())
+                await session.commit()
+                return await self._to_tool_model(tool, db=session)
+            except Exception:
+                await session.rollback()
+                return None
+
     async def delete_tool_by_id(self, id, db=None):
+        """Hard delete: the 30-day purge only, never the user-facing delete."""
         async with get_async_db_context(db) as session:
             try:
                 await self._lock_tool(session, id)
@@ -406,6 +441,31 @@ class ToolsTable:
             except Exception:
                 await session.rollback()
                 raise
+
+    async def _tombstone_rows(self, user_id: str | None = None, older_than: int | None = None, db=None) -> list[dict]:
+        async with get_async_db_context(db) as db:
+            query = select(Tool).filter(Tool.deleted_at.is_not(None))
+            if user_id:
+                query = query.filter(Tool.user_id == user_id)
+            if older_than is not None:
+                query = query.filter(Tool.deleted_at < older_than)
+            rows = (await db.execute(query)).scalars().all()
+            return [
+                {'id': row.id, 'name': row.name, 'user_id': row.user_id, 'deleted_at': row.deleted_at} for row in rows
+            ]
+
+    async def _restore_collision(self, item_id: str, db=None) -> bool:
+        # The tombstone holds the unique id; nothing live can share it.
+        return False
+
+    async def _restore(self, item_id: str, db=None):
+        return await self.restore_tool_by_id(item_id, db=db)
+
+    async def _purge(self, item_id: str, db=None) -> bool:
+        try:
+            return await self.delete_tool_by_id(item_id, db=db)
+        except Exception:
+            return False
 
 
 Tools = ToolsTable()  # singleton tool registry

@@ -34,6 +34,7 @@ class Skill(Base):
     meta = Column(JSON)
     is_active = Column(Boolean, default=True)
 
+    deleted_at = Column(BigInteger, nullable=True, index=True)
     updated_at = Column(BigInteger)
     created_at = Column(BigInteger)
 
@@ -212,14 +213,14 @@ class SkillsTable:
         try:
             async with get_async_db_context(db) as db:
                 skill = await db.get(Skill, id)
-                return await self._to_skill_model(skill, db=db) if skill else None
+                return await self._to_skill_model(skill, db=db) if skill and skill.deleted_at is None else None
         except Exception:
             return None
 
     async def get_skill_by_name(self, name: str, db: Optional[AsyncSession] = None) -> Optional[SkillModel]:
         try:
             async with get_async_db_context(db) as db:
-                result = await db.execute(select(Skill).filter_by(name=name))
+                result = await db.execute(select(Skill).filter_by(name=name).filter(Skill.deleted_at.is_(None)))
                 skill = result.scalars().first()
                 return await self._to_skill_model(skill, db=db) if skill else None
         except Exception:
@@ -232,7 +233,7 @@ class SkillsTable:
         db: AsyncSession | None = None,
     ) -> list[SkillUserModel]:
         async with get_async_db_context(db) as db:
-            stmt = select(Skill).order_by(Skill.updated_at.desc())
+            stmt = select(Skill).filter(Skill.deleted_at.is_(None)).order_by(Skill.updated_at.desc())
 
             if ids is not None:
                 stmt = stmt.filter(Skill.id.in_(ids))
@@ -291,6 +292,7 @@ class SkillsTable:
             async with get_async_db_context(db) as db:
                 # Join with User table for user filtering
                 stmt = select(Skill, User).outerjoin(User, User.id == Skill.user_id)
+                stmt = stmt.filter(Skill.deleted_at.is_(None))
 
                 if filter:
                     query_key = filter.get('query')
@@ -385,7 +387,7 @@ class SkillsTable:
         async with get_async_db_context(db) as session:
             try:
                 skill = await session.get(Skill, id, populate_existing=True)
-                if not skill:
+                if not skill or skill.deleted_at is not None:
                     return None
                 expected = updated.get('expected_version_id')
                 if expected is not None and expected != skill.version_id:
@@ -455,7 +457,7 @@ class SkillsTable:
                 # Lock before reading the target revision so deletion cannot race promotion.
                 await session.execute(update(Skill).where(Skill.id == id).values(version_id=Skill.version_id))
                 skill = await session.get(Skill, id, populate_existing=True)
-                if not skill:
+                if not skill or skill.deleted_at is not None:
                     return None
                 if expected_version_id != skill.version_id:
                     raise HTTPException(409, {'code': 'version_conflict', 'current_version_id': skill.version_id})
@@ -485,7 +487,7 @@ class SkillsTable:
     async def toggle_skill_by_id(self, id: str, db: Optional[AsyncSession] = None) -> Optional[SkillModel]:
         async with get_async_db_context(db) as db:
             try:
-                result = await db.execute(select(Skill).filter_by(id=id))
+                result = await db.execute(select(Skill).filter_by(id=id).filter(Skill.deleted_at.is_(None)))
                 skill = result.scalars().first()
                 if not skill:
                     return None
@@ -498,7 +500,34 @@ class SkillsTable:
             except Exception:
                 return None
 
+    async def tombstone_skill_by_id(self, id: str, db: Optional[AsyncSession] = None) -> bool:
+        """Soft-delete: hide the row, keep it and its history for restore."""
+        try:
+            async with get_async_db_context(db) as db:
+                await db.execute(
+                    update(Skill).filter_by(id=id).values(deleted_at=int(time.time()), updated_at=int(time.time()))
+                )
+                await db.commit()
+                return True
+        except Exception:
+            return False
+
+    async def restore_skill_by_id(self, id: str, db: Optional[AsyncSession] = None) -> Optional[SkillModel]:
+        try:
+            async with get_async_db_context(db) as db:
+                result = await db.execute(select(Skill).filter_by(id=id).filter(Skill.deleted_at.is_not(None)))
+                skill = result.scalars().first()
+                if not skill:
+                    return None
+                await db.execute(update(Skill).filter_by(id=id).values(deleted_at=None, updated_at=int(time.time())))
+                await db.commit()
+                await db.refresh(skill)
+                return await self._to_skill_model(skill, db=db)
+        except Exception:
+            return None
+
     async def delete_skill_by_id(self, id: str, db: Optional[AsyncSession] = None) -> bool:
+        """Hard delete: the 30-day purge only, never the user-facing delete."""
         try:
             async with get_async_db_context(db) as db:
                 await db.execute(delete(AccessGrant).filter_by(resource_type='skill', resource_id=id))
@@ -509,6 +538,40 @@ class SkillsTable:
                 return True
         except Exception:
             return False
+
+    async def _tombstone_rows(self, user_id: str | None = None, older_than: int | None = None, db=None) -> list[dict]:
+        async with get_async_db_context(db) as db:
+            query = select(Skill).filter(Skill.deleted_at.is_not(None))
+            if user_id:
+                query = query.filter(Skill.user_id == user_id)
+            if older_than is not None:
+                query = query.filter(Skill.deleted_at < older_than)
+            rows = (await db.execute(query)).scalars().all()
+            return [
+                {'id': row.id, 'name': row.name, 'user_id': row.user_id, 'deleted_at': row.deleted_at} for row in rows
+            ]
+
+    async def _restore_collision(self, item_id: str, db=None) -> bool:
+        """True when a live, differently-named row already holds this skill's unique name."""
+        async with get_async_db_context(db) as db:
+            row = (
+                (await db.execute(select(Skill).filter_by(id=item_id).filter(Skill.deleted_at.is_not(None))))
+                .scalars()
+                .first()
+            )
+            if not row or row.name is None:
+                return False
+            return (
+                (await db.execute(select(Skill).filter_by(name=row.name).filter(Skill.deleted_at.is_(None))))
+                .scalars()
+                .first()
+            ) is not None
+
+    async def _restore(self, item_id: str, db=None):
+        return await self.restore_skill_by_id(item_id, db=db)
+
+    async def _purge(self, item_id: str, db=None) -> bool:
+        return await self.delete_skill_by_id(item_id, db=db)
 
 
 Skills = SkillsTable()

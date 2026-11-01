@@ -75,6 +75,33 @@ log = logging.getLogger(__name__)
 
 MAX_KNOWLEDGE_BASE_SEARCH_ITEMS = 10_000
 
+# Direct exposure (ADR 0003, amended): the builtins the bridge declares to the
+# sidecar without tool search. The arm the everyday spine (search, memory,
+# code) plus the Knowledge-family writers, which must never hide behind
+# discovery. loopback_mcp unions this set into the binding's direct list; the
+# sidecar constant remains its relay-fallback mirror.
+DIRECT_EXPOSURE_TOOLS = frozenset(
+    {
+        'search_web',
+        'fetch_url',
+        'execute_code',
+        'generate_image',
+        'search_memories',
+        'read_memory_path',
+        'list_memory_paths',
+        'list_memories',
+        'add_memory',
+        'update_memory',
+        'replace_memory_content',
+        'delete_memory',
+        'create_knowledge',
+        'update_knowledge',
+        'write_knowledge_file',
+        'delete_knowledge_file',
+        'delete_knowledge',
+    }
+)
+
 
 async def _has_write_access_to_note(note, user_id: str) -> bool:
     if note.user_id == user_id:
@@ -3833,6 +3860,585 @@ async def update_skill_files(
                 'message': 'Skill changed. Call view_skill again and reapply the edit.',
             }
         return JSONCodec.dumps({'error': detail})
+
+
+# =============================================================================
+# WORKSPACE AUTHORING (PR12): the agent authors Tools, Prompts, Skills, and
+# Knowledge as its driving user. Every write carries the user's authority and
+# the same permission gates a human write passes: the artifact is owned by the
+# driving user, starts private (no grants), and never touches Models (read-
+# only) or Functions (closed). Deletes tombstone for 30 days with full edit
+# history, and restore rides wherever edit is (ADR 0003).
+# =============================================================================
+
+
+_AUTHORING_GATES = {
+    'prompt': ('workspace.prompts', 'workspace.prompts_import'),
+    'tool': ('workspace.tools', 'workspace.tools_import'),
+    'skill': ('workspace.skills',),
+    'knowledge': ('workspace.knowledge',),
+}
+
+
+async def _has_authoring_permission(user: dict, kind: str) -> bool:
+    """The gate any human write of this artifact kind passes first."""
+    from open_webui.models.config import Config
+    from open_webui.utils.access_control import has_permission
+
+    if user.get('role') == 'admin':
+        return True
+    for permission in _AUTHORING_GATES[kind]:
+        if await has_permission(user['id'], permission, await Config.get('user.permissions')):
+            return True
+    return False
+
+
+def _actor(__user__: dict):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**__user__)
+
+
+def _error_of(error: Exception) -> str:
+    detail = getattr(error, 'detail', str(error))
+    if isinstance(detail, dict):
+        detail = detail.get('message') or detail.get('detail') or str(detail)
+    return str(detail)
+
+
+async def _record_knowledge_history(
+    knowledge_id: str,
+    user_id: str,
+    operation: str,
+    snapshot: dict,
+    commit_message: str = None,
+) -> None:
+    """Chain one structure or file-operation entry onto the KB's edit history."""
+    from open_webui.models.knowledge_history import KnowledgeHistories
+
+    latest = await KnowledgeHistories.get_latest_history_entry(knowledge_id)
+    await KnowledgeHistories.create_history_entry(
+        knowledge_id=knowledge_id,
+        operation=operation,
+        snapshot=snapshot,
+        user_id=user_id,
+        parent_id=latest.id if latest else None,
+        commit_message=commit_message,
+    )
+
+
+async def create_prompt(
+    command: str,
+    name: str,
+    content: str,
+    data: dict = None,
+    description: str = None,
+    tags: list[str] = None,
+    commit_message: str = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Create a Prompt as your user: owned by you, private (no sharing grants). Slash commands start with '/'.
+
+    :param command: Unique slash command, e.g. /standup-writer.
+    :param name: Display name.
+    :param content: The prompt template body. Variables use {{NAME}} syntax.
+    :param data: Optional prompt parameters the app understands.
+    :param description: Optional description kept in metadata.
+    :param tags: Optional tags.
+    :param commit_message: Optional note for the first history version.
+    """
+    try:
+        from open_webui.models.prompts import PromptForm
+        from open_webui.routers.prompts import create_new_prompt
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        if not await _has_authoring_permission(__user__, 'prompt'):
+            return JSONCodec.dumps({'error': 'Prompt authoring permission required'})
+        metadata = {'description': description} if description else None
+        prompt = await create_new_prompt(
+            __request__,
+            PromptForm(
+                command=command,
+                name=name,
+                content=content,
+                data=data,
+                meta=metadata,
+                tags=tags or [],
+                commit_message=commit_message,
+                access_grants=[],
+            ),
+            _actor(__user__),
+            None,
+        )
+        return JSONCodec.dumps({'id': prompt.id, 'command': prompt.command, 'url': '/workspace/prompts/' + prompt.id})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def update_prompt(
+    id: str,
+    name: str = None,
+    command: str = None,
+    content: str = None,
+    description: str = None,
+    tags: list[str] = None,
+    commit_message: str = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Edit a Prompt you can write as your user; every save lands in the version history.
+
+    :param id: Prompt id to edit. Requires write access.
+    :param name: New display name (keep current when omitted).
+    :param command: New slash command (keep current when omitted).
+    :param content: New template body (keep current when omitted).
+    :param description: New description (keep current when omitted).
+    :param tags: Replacement tags (keep current when omitted).
+    :param commit_message: Description of this change.
+    """
+    try:
+        from open_webui.models.prompts import PromptForm, Prompts
+        from open_webui.routers.prompts import update_prompt_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        if not await _has_authoring_permission(__user__, 'prompt'):
+            return JSONCodec.dumps({'error': 'Prompt authoring permission required'})
+        current = await Prompts.get_prompt_by_id(id)
+        if current is None:
+            return JSONCodec.dumps({'error': 'prompt not found: ' + id})
+        metadata = dict(current.meta or {})
+        if description is not None:
+            metadata['description'] = description
+        form = PromptForm(
+            command=command if command is not None else current.command,
+            name=name if name is not None else current.name,
+            content=content if content is not None else current.content,
+            data=current.data,
+            meta=metadata,
+            tags=tags,
+            commit_message=commit_message,
+            access_grants=None,
+        )
+        prompt = await update_prompt_by_id(__request__, id, form, _actor(__user__), None)
+        if prompt is None:
+            return JSONCodec.dumps({'error': 'prompt update failed'})
+        return JSONCodec.dumps({'id': prompt.id, 'command': prompt.command, 'url': '/workspace/prompts/' + prompt.id})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def delete_prompt(
+    id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Delete a Prompt you can edit. It becomes a 30-day tombstone; the workspace can restore it.
+
+    :param id: Prompt id to delete.
+    """
+    try:
+        from open_webui.routers.prompts import delete_prompt_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        deleted = await delete_prompt_by_id(__request__, id, _actor(__user__), None)
+        return JSONCodec.dumps({'id': id, 'deleted': bool(deleted), 'restorable': True})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def create_tool(
+    id: str,
+    name: str,
+    content: str,
+    description: str = None,
+    commit_message: str = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Create a Tool as your user: Python source whose class methods become callable tools. Owned by you, private. Module-load checking runs at save.
+
+    :param id: Unique tool id, lowercase letters and underscores only.
+    :param name: Display name.
+    :param content: Full Python source: a Tools class with one method per tool, docstrings as descriptions.
+    :param description: Optional description.
+    :param commit_message: Optional note for the first version.
+    """
+    try:
+        from open_webui.models.tools import ToolForm, ToolMeta
+        from open_webui.routers.tools import create_new_tools
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        if not await _has_authoring_permission(__user__, 'tool'):
+            return JSONCodec.dumps({'error': 'Tool authoring permission required'})
+        tool = await create_new_tools(
+            __request__,
+            ToolForm(
+                id=(id or '').lower(),
+                name=name,
+                content=content,
+                meta=ToolMeta(description=description),
+                access_grants=[],
+                commit_message=commit_message,
+            ),
+            _actor(__user__),
+            None,
+        )
+        return JSONCodec.dumps({'id': tool.id, 'url': '/workspace/tools/edit?id=' + tool.id})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def update_tool(
+    id: str,
+    content: str = None,
+    name: str = None,
+    description: str = None,
+    commit_message: str = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Edit a Tool you can write; the source reloads at save and a version entry records the change.
+
+    :param id: Tool id to edit. Requires write access.
+    :param content: The full replacement Python source (keep current when omitted).
+    :param name: New display name (keep current when omitted).
+    :param description: New description (keep current when omitted).
+    :param commit_message: Description of this change.
+    """
+    try:
+        from open_webui.models.tools import ToolForm, ToolMeta, Tools
+        from open_webui.routers.tools import update_tools_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        if not await _has_authoring_permission(__user__, 'tool'):
+            return JSONCodec.dumps({'error': 'Tool authoring permission required'})
+        current = await Tools.get_tool_by_id(id)
+        if current is None:
+            return JSONCodec.dumps({'error': 'tool not found: ' + id})
+        meta = (
+            current.meta
+            if isinstance(current.meta, dict)
+            else (current.meta.model_dump() if hasattr(current.meta, 'model_dump') else dict(current.meta or {}))
+        )
+        meta.pop('manifest', None)
+        if description is not None:
+            meta['description'] = description
+        tool = await update_tools_by_id(
+            __request__,
+            id,
+            ToolForm(
+                id=id,
+                name=name if name is not None else current.name,
+                content=content if content is not None else current.content,
+                meta=ToolMeta(**meta),
+                access_grants=None,
+                commit_message=commit_message,
+            ),
+            _actor(__user__),
+            None,
+        )
+        return JSONCodec.dumps(
+            {'id': tool.id, 'version_id': tool.version_id, 'url': '/workspace/tools/edit?id=' + tool.id}
+        )
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def delete_tool(
+    id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Delete a Tool you can edit. It becomes a 30-day tombstone; the version history survives a restore.
+
+    :param id: Tool id to delete.
+    """
+    try:
+        from open_webui.routers.tools import delete_tools_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        deleted = await delete_tools_by_id(__request__, id, _actor(__user__), None)
+        return JSONCodec.dumps({'id': id, 'deleted': bool(deleted), 'restorable': True})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def delete_skill(
+    id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Delete a workspace Skill you can edit. It becomes a 30-day tombstone; a restore brings the files back.
+
+    :param id: Skill id to delete.
+    """
+    try:
+        from open_webui.routers.skills import delete_skill_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        deleted = await delete_skill_by_id(__request__, id, _actor(__user__), None)
+        return JSONCodec.dumps({'id': id, 'deleted': bool(deleted), 'restorable': True})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def create_knowledge(
+    name: str,
+    description: str = '',
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Create a Knowledge base as your user: owned by you, private, searchable, ready for write_knowledge_file. Files ride chat attachments by id.
+
+    :param name: Display name of the knowledge base.
+    :param description: What the knowledge base collects.
+    """
+    try:
+        from open_webui.models.knowledge import KnowledgeForm
+        from open_webui.routers.knowledge import create_new_knowledge
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        if not await _has_authoring_permission(__user__, 'knowledge'):
+            return JSONCodec.dumps({'error': 'Knowledge authoring permission required'})
+        knowledge = await create_new_knowledge(
+            __request__,
+            KnowledgeForm(name=name, description=description or '', access_grants=[]),
+            _actor(__user__),
+        )
+        await _record_knowledge_history(
+            knowledge.id,
+            __user__['id'],
+            'create',
+            {'name': knowledge.name, 'description': knowledge.description, 'files': []},
+            commit_message=description or '',
+        )
+        return JSONCodec.dumps({'id': knowledge.id, 'url': '/workspace/knowledge?id=' + knowledge.id})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def update_knowledge(
+    id: str,
+    name: str = None,
+    description: str = None,
+    commit_message: str = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Edit a Knowledge base's name or description as its writer; the change lands in the edit history.
+
+    :param id: Knowledge base id. Requires write access.
+    :param name: New display name (keep current when omitted).
+    :param description: New description (keep current when omitted).
+    :param commit_message: Description of this change.
+    """
+    try:
+        from open_webui.models.knowledge import KnowledgeForm, Knowledges
+        from open_webui.routers.knowledge import update_knowledge_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        if not await _has_authoring_permission(__user__, 'knowledge'):
+            return JSONCodec.dumps({'error': 'Knowledge authoring permission required'})
+        current = await Knowledges.get_knowledge_by_id(id=id)
+        if current is None:
+            return JSONCodec.dumps({'error': 'knowledge base not found: ' + id})
+        knowledge = await update_knowledge_by_id(
+            __request__,
+            id,
+            KnowledgeForm(
+                name=name if name is not None else current.name,
+                description=description if description is not None else current.description,
+                access_grants=None,
+            ),
+            _actor(__user__),
+        )
+        if knowledge is None:
+            return JSONCodec.dumps({'error': 'knowledge update failed'})
+        await _record_knowledge_history(
+            id,
+            __user__['id'],
+            'structure',
+            {'name': knowledge.name, 'description': knowledge.description},
+            commit_message=commit_message,
+        )
+        return JSONCodec.dumps({'id': knowledge.id, 'url': '/workspace/knowledge?id=' + knowledge.id})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def write_knowledge_file(
+    knowledge_id: str,
+    filename: str,
+    content: str,
+    directory_id: str = None,
+    commit_message: str = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Write a UTF-8 text file into a Knowledge base as its writer: processed for search, recorded in the KB's edit history.
+
+    :param knowledge_id: Knowledge base to write into. Requires write access.
+    :param filename: File name inside the KB, e.g. mooring-notes.txt.
+    :param content: The complete UTF-8 text of the file.
+    :param directory_id: Optional directory inside the KB.
+    :param commit_message: Description of this write.
+    """
+    try:
+        import io
+
+        from starlette.datastructures import Headers, UploadFile
+
+        from open_webui.internal.db import get_async_db
+        from open_webui.routers.files import upload_file_handler
+        from open_webui.routers.knowledge import KnowledgeFileIdForm, add_file_to_knowledge_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        if not await _has_authoring_permission(__user__, 'knowledge'):
+            return JSONCodec.dumps({'error': 'Knowledge authoring permission required'})
+        payload = content.encode('utf-8') if isinstance(content, str) else content
+        try:
+            payload.decode('utf-8')
+        except UnicodeDecodeError:
+            return JSONCodec.dumps({'error': 'knowledge file writes are UTF-8 text only'})
+        upload = UploadFile(
+            filename=filename.rsplit('/', 1)[-1],
+            file=io.BytesIO(payload),
+            size=len(payload),
+            headers=Headers({'content-type': 'text/plain'}),
+        )
+        # One session runs upload and attach end to end: process_file commits
+        # through it before the slow embedding step.
+        async with get_async_db() as db:
+            created = await upload_file_handler(
+                __request__,
+                file=upload,
+                metadata=None,
+                process=True,
+                process_in_background=False,
+                user=_actor(__user__),
+                background_tasks=None,
+                db=db,
+            )
+            file_id = created.get('id') if isinstance(created, dict) else created.id
+            await add_file_to_knowledge_by_id(
+                __request__,
+                knowledge_id,
+                KnowledgeFileIdForm(file_id=file_id, directory_id=directory_id),
+                _actor(__user__),
+                db,
+            )
+        await _record_knowledge_history(
+            knowledge_id,
+            __user__['id'],
+            'file_added',
+            {'file_id': file_id, 'filename': filename.rsplit('/', 1)[-1], 'directory_id': directory_id},
+            commit_message=commit_message,
+        )
+        return JSONCodec.dumps({'id': file_id, 'knowledge_id': knowledge_id})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def delete_knowledge_file(
+    knowledge_id: str,
+    file_id: str,
+    commit_message: str = None,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Remove a file from a Knowledge base you can write. The removal is history-recorded and reversible while the file row survives.
+
+    :param knowledge_id: Knowledge base id.
+    :param file_id: File to remove from the KB.
+    :param commit_message: Description of this removal.
+    """
+    try:
+        from open_webui.models.files import Files
+        from open_webui.routers.knowledge import KnowledgeFileIdForm, remove_file_from_knowledge_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        if not await _has_authoring_permission(__user__, 'knowledge'):
+            return JSONCodec.dumps({'error': 'Knowledge authoring permission required'})
+        file = await Files.get_file_by_id(file_id)
+        if file is None:
+            return JSONCodec.dumps({'error': 'file not found: ' + file_id})
+        await remove_file_from_knowledge_by_id(
+            __request__,
+            knowledge_id,
+            KnowledgeFileIdForm(file_id=file_id),
+            delete_file=False,
+            user=_actor(__user__),
+            db=None,
+        )
+        await _record_knowledge_history(
+            knowledge_id,
+            __user__['id'],
+            'file_removed',
+            {'file_id': file_id, 'filename': file.filename},
+            commit_message=commit_message,
+        )
+        return JSONCodec.dumps({'id': file_id, 'knowledge_id': knowledge_id, 'removed': True})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def delete_knowledge(
+    id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Delete a Knowledge base you can edit. It becomes a 30-day tombstone: files and edit history survive a restore.
+
+    :param id: Knowledge base id to delete.
+    """
+    try:
+        from open_webui.routers.knowledge import delete_knowledge_by_id
+
+        if __request__ is None or not __user__:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        deleted = await delete_knowledge_by_id(__request__, id, _actor(__user__), None)
+        return JSONCodec.dumps({'id': id, 'deleted': bool(deleted), 'restorable': True})
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
+
+
+async def restore_workspace_item(
+    kind: str,
+    id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Restore a tombstoned workspace artifact (tool, prompt, skill, or knowledge): it returns with its history intact, wherever edit is permitted.
+
+    :param kind: One of tool, prompt, skill, knowledge.
+    :param id: The artifact id, from the deleted list or a previous message.
+    """
+    try:
+        from open_webui.routers.agent_workspace import restore_artifact
+
+        if __user__ is None:
+            return JSONCodec.dumps({'error': 'Request and user context required'})
+        requested = (kind or '').lower()
+        if requested not in _AUTHORING_GATES:
+            return JSONCodec.dumps({'error': f'unknown artifact kind: {requested}'})
+        if not await _has_authoring_permission(__user__, requested):
+            return JSONCodec.dumps({'error': f'{requested} authoring permission required'})
+        restored = await restore_artifact(requested, id, _actor(__user__))
+        return JSONCodec.dumps(restored)
+    except Exception as error:
+        return JSONCodec.dumps({'error': _error_of(error)})
 
 
 # =============================================================================
