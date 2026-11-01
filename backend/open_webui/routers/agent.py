@@ -43,17 +43,12 @@ from fastapi.responses import StreamingResponse
 from open_webui.models.chats import Chats
 from open_webui.loopback_mcp import mint_session_binding
 from open_webui.routers.agent_machines import mint_machine_binding
+from open_webui.utils.agent_loop import agent_loop_model_ids
 from open_webui.utils.chat_id import is_saved_chat_id
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Model ids routed to the sidecar loop. Empty by default: the bridge is off
-# until the deployment names the agent models.
-AGENT_LOOP_MODEL_IDS = {
-    model_id.strip() for model_id in os.environ.get('AGENT_LOOP_MODEL_IDS', '').split(',') if model_id.strip()
-}
 
 STREAM_STALL_TIMEOUT_S = int(os.environ.get('AGENT_SIDECAR_STREAM_TIMEOUT', '0') or 0) or None
 REQUEST_TIMEOUT_S = float(os.environ.get('AGENT_SIDECAR_REQUEST_TIMEOUT', '30') or 30)
@@ -75,7 +70,7 @@ def _client() -> httpx.AsyncClient:
 
 
 def is_agent_model(model_id: str) -> bool:
-    return bool(sidecar_base_url()) and model_id in AGENT_LOOP_MODEL_IDS
+    return bool(sidecar_base_url()) and model_id in agent_loop_model_ids()
 
 
 def is_internal_task_call(metadata: dict) -> bool:
