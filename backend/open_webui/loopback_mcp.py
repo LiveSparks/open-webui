@@ -106,6 +106,18 @@ def loopback_url(request: Request) -> str:
     return f'{base}/loopback/mcp'
 
 
+def _slim_direct_tools(metadata: dict) -> dict:
+    """The turn's direct tool entries as a slim key-free claims map (PR13).
+
+    Delegates the shape to the direct relay module: spec + slim server view
+    per name, never a key or auth material — the binding the sidecar holds
+    carries only what the user's browser dials with.
+    """
+    from open_webui.routers.agent_direct import slim_direct_tools
+
+    return slim_direct_tools(metadata)
+
+
 def _selected_direct_tools(metadata: dict) -> list[str]:
     """Names of the turn's user-selected tools that should be declared direct.
 
@@ -154,6 +166,10 @@ def mint_session_binding(request: Request, user: Any, metadata: dict, model_id: 
         'tool_ids': metadata.get('tool_ids') or [],
         'files': metadata.get('files') or [],
         'features': metadata.get('features') or {},
+        # The turn's direct OpenAPI tool servers (PR13): slim key-free entries
+        # the bridge re-resolves into browser-relayed tools, per the direct
+        # connections decision.
+        'direct_tools': _slim_direct_tools(metadata),
         # The selected machine a delegation carries to its child runs (PR9):
         # claims, not the direct list, because tools re-resolve from claims.
         'terminal_id': (metadata.get('terminal_id') or '') if isinstance(metadata, dict) else '',
@@ -234,9 +250,10 @@ async def resolve_bridge_tools(request: Request, claims: dict) -> tuple[dict[str
     """The tools_dict this turn would carry, rebuilt from the binding claims.
 
     Same resolution order as `process_chat_payload`: the Tools registry and
-    tool servers via `get_tools`, the MCP relay, then builtins filling names
-    not taken. Entries without a callable (direct tool servers executed
-    client-side) never bridge.
+    tool servers via `get_tools`, the MCP relay, the direct servers as
+    browser-relayed tools (PR13), then builtins filling names not taken.
+    A binding without the direct claims — an old sidecar's token, for
+    instance — bridges nothing extra: the absent entries simply stay absent.
     """
     from open_webui.models.chats import Chats
     from open_webui.models.models import Models
@@ -271,6 +288,12 @@ async def resolve_bridge_tools(request: Request, claims: dict) -> tuple[dict[str
         'message_id': claims.get('message_id') or '',
         'session_id': claims.get('session_id') or '',
         'model_id': model_id,
+        # The owning user the event callers scope their targets with: the native
+        # loop carries `user_id` on this same metadata, and socket/main.py's
+        # emitter closes over it and the caller checks the session against it —
+        # without it a live tab's own relay refuses as 'Client session
+        # disconnected.' (PR13, the browser-relay leg).
+        'user_id': user.id,
         'files': claims.get('files') or [],
         # The rest of the turn envelope the native loop built: a delegation
         # (PR9, issue 10) reconstructs its child run from this metadata, so
@@ -303,6 +326,19 @@ async def resolve_bridge_tools(request: Request, claims: dict) -> tuple[dict[str
     relay, clients = await _relay_tools(request, mcp_tool_ids, user, extra_params)
     tools_dict = {**tools_dict, **relay}
     builtin_tools = await get_builtin_tools(request, extra_params, claims.get('features') or {}, model)
+    # The direct servers' relays (PR13): these entries execute in the user's
+    # browser through the `execute:tool` event, so they bridge instead of
+    # dying. They merge before the builtin fill, and a name that shadows a
+    # resolved builtin is refused — built-ins never take a browser-held
+    # connection.
+    from open_webui.routers.agent_direct import build_relay_tools
+
+    direct_relay = build_relay_tools(
+        claims,
+        event_caller,
+        builtin_names=set(builtin_tools),
+    )
+    tools_dict = {**tools_dict, **direct_relay}
     for name, tool_dict in builtin_tools.items():
         if name not in tools_dict:
             tools_dict[name] = tool_dict
@@ -340,7 +376,9 @@ def _mcp_tools_payload(tools_dict: dict[str, dict]) -> list[dict]:
         callable = tool_dict.get('callable')
         spec = tool_dict.get('spec')
         if callable is None or not isinstance(spec, dict):
-            # Direct tool servers execute client-side; nothing bridges.
+            # A direct entry the direct-relay module did not upgrade (old
+            # binding claims without the entries, a stripped direct list)
+            # still has nothing to bridge.
             continue
         tools.append(
             {
