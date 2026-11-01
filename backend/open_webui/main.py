@@ -150,6 +150,7 @@ from open_webui.models.models import Models, normalize_model_tags
 from open_webui.models.groups import Groups, resolve_group_default_models
 from open_webui.models.users import Users
 from open_webui.loopback_mcp import router as loopback_mcp_router
+from open_webui.routers.agent_lessons import router as agent_lessons_router
 from open_webui.routers.agent_machines import router as agent_machines_router
 from open_webui.routers.agent_runtime import router as agent_runtime_router
 from open_webui.routers.agent_workspace import router as agent_workspace_router
@@ -943,6 +944,10 @@ app.include_router(calendar.router, prefix='/api/v1/calendars', tags=['calendars
 # SCIM 2.0 API for identity management
 if ENABLE_SCIM:
     app.include_router(scim.router, prefix='/api/v1/scim/v2', tags=['scim'])
+
+# Agent self-learning loop (PR11): the user/admin lesson routes and the loopback
+# learning hooks the sidecar dials with its session binding.
+app.include_router(agent_lessons_router, tags=['lessons'])
 
 
 ##################################
