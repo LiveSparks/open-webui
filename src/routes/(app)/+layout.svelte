@@ -50,7 +50,6 @@
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
 	import UpdateInfoToast from '$lib/components/layout/UpdateInfoToast.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
-	import LessonSavedCue from '$lib/components/chat/LessonSavedCue.svelte';
 	import { loadKeybindings, matchKeybinding, Shortcut } from '$lib/shortcuts';
 
 	const i18n = getContext('i18n');
@@ -490,7 +489,6 @@
 			{:else}
 				<Sidebar />
 
-				<LessonSavedCue />
 				{#if loaded}
 					<main id="main-content" class="contents">
 						<slot />
