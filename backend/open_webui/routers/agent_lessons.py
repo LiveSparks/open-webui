@@ -544,6 +544,34 @@ def _binding_claims(request: Request) -> dict:
     return verify_session_binding(token)
 
 
+def _topic_slug(lesson: LessonModel) -> str:
+    """The lesson's topic as a short slugged string for the saved cue."""
+    return re.sub(r'[^a-z0-9]+', '-', normalize_lesson_text(lesson.title))[:80].strip('-')
+
+
+async def publish_lesson_saved(user_id: str, chat_id: str, lesson: LessonModel) -> None:
+    """One quiet publish at write time under the user-scoped channel: the chat
+    surface listens for `chat:lesson:saved` and shows the 'Saved as lesson'
+    cue. The payload carries the lesson id and its topic slug and nothing
+    else, and a broken socket never fails the reflect response."""
+    from open_webui.socket.main import sio
+
+    try:
+        await sio.emit(
+            'events',
+            {
+                'chat_id': chat_id,
+                'data': {
+                    'type': 'chat:lesson:saved',
+                    'data': {'lessonId': lesson.id, 'topic': _topic_slug(lesson)},
+                },
+            },
+            room=f'user:{user_id}',
+        )
+    except Exception as e:
+        log.debug(f'lesson-saved publish skipped: {e}')
+
+
 @loopback_router.post('/prepare')
 async def prepare_turn_injection(request: Request):
     """The per-turn retrieval the injector calls before the model runs.
@@ -706,6 +734,7 @@ async def reflect_after_turn(request: Request):
         confidence=float(config['base_confidence']),
     )
     await LessonRecords.record_lesson_event(lesson.id, user_id, 'written', note=source[:200])
+    await publish_lesson_saved(user_id, chat_id, lesson)
     await lesson_vector_upsert(request, user_id, lesson)
     await enforce_caps(request, user_id, config)
     return {
