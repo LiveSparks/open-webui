@@ -36,10 +36,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_session
 from open_webui.loopback_mcp import verify_session_binding
 from open_webui.models.lessons import (
@@ -52,6 +49,10 @@ from open_webui.models.lessons import (
 )
 from open_webui.models.users import Users
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.chat_id import is_saved_chat_id
+from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
 
@@ -545,31 +546,69 @@ def _binding_claims(request: Request) -> dict:
 
 
 def _topic_slug(lesson: LessonModel) -> str:
-    """The lesson's topic as a short slugged string for the saved cue."""
+    """The lesson's topic as a short slugged string for the event data bag."""
     return re.sub(r'[^a-z0-9]+', '-', normalize_lesson_text(lesson.title))[:80].strip('-')
 
 
-async def publish_lesson_saved(user_id: str, chat_id: str, lesson: LessonModel) -> None:
-    """One quiet publish at write time under the user-scoped channel: the chat
-    surface listens for `chat:lesson:saved` and shows the 'Saved as lesson'
-    cue. The payload carries the lesson id and its topic slug and nothing
-    else, and a broken socket never fails the reflect response."""
-    from open_webui.socket.main import sio
+def _saved_row_text(lesson: LessonModel) -> str:
+    """The row's en-US content, style-consistent with the memory row: the
+    event's message, then the topic the lesson names."""
+    return f'{EVENTS.LESSON_SAVED.message}: {lesson.title}'
 
+
+async def lay_lesson_saved_row(
+    request: Request, user_id: str, chat_id: str, message_id: str, lesson: LessonModel
+) -> None:
+    """The memory-save event style for lessons (operator ruling, 2026-11-01):
+    the write publishes one `EVENTS.LESSON_SAVED` (message field 'Lesson
+    saved') with a data bag (topic slug, lesson id, chat), then lays one
+    persistent in-chat row through the chat event surface — the same
+    event-emitter status machinery the memory notices ride, which records the
+    row inside the chat record so reloading the chat re-renders it
+    (socket/main.py persists a `status` emit through
+    Chats.add_message_status_to_chat_by_id_and_message_id; ResponseMessage
+    renders the turn's statusHistory). A failed row never fails the reflect
+    response."""
     try:
-        await sio.emit(
-            'events',
-            {
+        actor = await Users.get_user_by_id(user_id)
+        await publish_event(
+            request,
+            EVENTS.LESSON_SAVED,
+            actor=actor,
+            subject_id=lesson.id,
+            subject_type='lesson',
+            data={
+                'lesson_id': lesson.id,
+                'topic': _topic_slug(lesson),
+                'title': lesson.title,
                 'chat_id': chat_id,
-                'data': {
-                    'type': 'chat:lesson:saved',
-                    'data': {'lessonId': lesson.id, 'topic': _topic_slug(lesson)},
-                },
+                'message_id': message_id,
             },
-            room=f'user:{user_id}',
         )
     except Exception as e:
-        log.debug(f'lesson-saved publish skipped: {e}')
+        log.warning(f'lesson-saved event publish skipped: {e}')
+
+    if not chat_id or not message_id or not is_saved_chat_id(chat_id):
+        return
+    try:
+        from open_webui.socket.main import get_event_emitter
+
+        emitter = await get_event_emitter({'user_id': user_id, 'chat_id': chat_id, 'message_id': message_id})
+        if not emitter:
+            return
+        await emitter(
+            {
+                'type': 'status',
+                'data': {
+                    'action': 'lesson_saved',
+                    'description': _saved_row_text(lesson),
+                    'lessonId': lesson.id,
+                    'done': True,
+                },
+            }
+        )
+    except Exception as e:
+        log.debug(f'lesson-saved row skipped: {e}')
 
 
 @loopback_router.post('/prepare')
@@ -646,6 +685,7 @@ async def reflect_after_turn(request: Request):
     claims = _binding_claims(request)
     user_id = claims.get('user_id') or ''
     chat_id = claims.get('chat_id') or ''
+    message_id = claims.get('message_id') or ''
     try:
         form = LessonReflectForm(**(await request.json()))
     except Exception:
@@ -734,7 +774,7 @@ async def reflect_after_turn(request: Request):
         confidence=float(config['base_confidence']),
     )
     await LessonRecords.record_lesson_event(lesson.id, user_id, 'written', note=source[:200])
-    await publish_lesson_saved(user_id, chat_id, lesson)
+    await lay_lesson_saved_row(request, user_id, chat_id, message_id, lesson)
     await lesson_vector_upsert(request, user_id, lesson)
     await enforce_caps(request, user_id, config)
     return {
