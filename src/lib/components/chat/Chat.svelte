@@ -5547,13 +5547,22 @@
 									</div>
 								{/if}
 							{:else}
-								<RunningSubAgents
-									bind:this={runningSubAgents}
-									chatId={$chatId}
-									{history}
-									onOpenChild={openSubagentChild}
-									onSteerChild={steerSubagentChild}
-								/>
+								<!-- The cards ride the composer's own column (MessageInput's
+									max-w-[58rem] wrapper): without it the mount sits directly
+									on the full-width chat pane and the cards span the screen. -->
+								<div
+									class="{($settings?.widescreenMode ?? null)
+										? 'max-w-full'
+										: 'max-w-[58rem]'} px-2 mx-auto inset-x-0 w-full"
+								>
+									<RunningSubAgents
+										bind:this={runningSubAgents}
+										chatId={$chatId}
+										{history}
+										onOpenChild={openSubagentChild}
+										onSteerChild={steerSubagentChild}
+									/>
+								</div>
 								<div
 									id={embedded ? messageInputDropzoneId : undefined}
 									class=" pb-2 {dragged ? 'z-0' : 'z-10'}"
@@ -5655,13 +5664,21 @@
 										</div>
 									</div>
 								{/if}
-								<RunningSubAgents
-									bind:this={runningSubAgents}
-									chatId={$chatId}
-									{history}
-									onOpenChild={openSubagentChild}
-									onSteerChild={steerSubagentChild}
-								/>
+								<!-- Same column wrapper as the standard mount above: the
+									embedded composer keeps its cards on the chat column. -->
+								<div
+									class="{($settings?.widescreenMode ?? null)
+										? 'max-w-full'
+										: 'max-w-[58rem]'} px-2 mx-auto inset-x-0 w-full"
+								>
+									<RunningSubAgents
+										bind:this={runningSubAgents}
+										chatId={$chatId}
+										{history}
+										onOpenChild={openSubagentChild}
+										onSteerChild={steerSubagentChild}
+									/>
+								</div>
 								<div id={embedded ? messageInputDropzoneId : undefined} class="pb-2 z-10">
 									<MessageInput
 										{terminalContext}
