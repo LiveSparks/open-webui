@@ -38,7 +38,17 @@ import {
 import { ConfidenceLedger } from "./learning/ledger.ts";
 import { Reflector } from "./learning/reflector.ts";
 import { buildMachineTools, machineChatRoot } from "./machineTools.ts";
-import { createTurnController, buildTurnExtension, type TurnController, type TurnEnvelope, type TurnState, applyTurnEnvelope } from "./providers.ts";
+import {
+	applyTurnEnvelope,
+	buildHeadInjectionExtension,
+	buildTurnExtension,
+	createHeadInjectionState,
+	createTurnController,
+	type HeadInjectionState,
+	type TurnController,
+	type TurnEnvelope,
+	type TurnState,
+} from "./providers.ts";
 
 /**
  * The bridge seam, proven end to end by the live lanes: a custom tool the chat
@@ -217,6 +227,10 @@ interface ChatEntry {
 	disposed?: boolean;
 	/** The per-turn model/key/header handoff (PR6); bound when the session carries a loopback binding. */
 	turn: TurnController | undefined;
+	/** The per-turn head slot (PR11 fix round 1): the lesson block the head
+	 * extension projects onto the provider request head; null before set and
+	 * after every run, and never the user turn. */
+	headInjection: HeadInjectionState;
 	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
 	lastUsedAt: number;
 	/** Monotonic tiebreaker over lastUsedAt: a strict LRU order. */
@@ -506,7 +520,8 @@ export class SessionRegistry {
 		const sessionCwd = machineBound ? machineChatRoot(chatId) : this.config.cwd;
 		const bridge: BridgeControl = { sync: async () => undefined };
 		const turnState: TurnState = { current: undefined };
-		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge, turnState);
+		const headInjection = createHeadInjectionState();
+		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge, turnState, headInjection);
 		// Loads the factories (bridge registrar, MCP connector, codemode, tool
 		// search) and runs extensionsOverride, which splices the gate in.
 		await resourceLoader.reload();
@@ -556,6 +571,7 @@ export class SessionRegistry {
 			machineBound,
 			bridge,
 			turn,
+			headInjection,
 			abortRequested: false,
 			lastUsedAt: now,
 			lastUsedSeq: this.touch(),
@@ -580,6 +596,7 @@ export class SessionRegistry {
 		bindingRef: BindingRef,
 		bridge: BridgeControl,
 		turnState: TurnState,
+		headInjection: HeadInjectionState,
 	) {
 		const extensionFactories: InlineExtension[] = [];
 		if (bindingRef.current) {
@@ -587,6 +604,8 @@ export class SessionRegistry {
 				buildLoopbackBridgeExtension(bindingRef, bridge),
 				// The per-request seams (PR6, issue 23): header map + payload params.
 				buildTurnExtension(turnState),
+				// The per-turn head injection (PR11): the lessons block rides the head.
+				buildHeadInjectionExtension(headInjection),
 				createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }) }),
 				createCodemodeExtension({ mode: "on" }),
 				createToolSearchExtension(),
@@ -725,7 +744,11 @@ export class SessionRegistry {
 				if (prepared) {
 					learningRan = prepared.enabled;
 					if (prepared.block) {
-						text = `${prepared.block}${text}`;
+						// Fix round 1: the block rides the head channel (the same
+						// system-side head the prompt handoff of PR3/PR8 rides),
+						// never the user turn: the head projection keeps the lesson
+						// off the transcript and off the stored chat record.
+						entry.headInjection.current = prepared.block;
 						injectedLessonIds = prepared.injectedLessonIds;
 					}
 				}
@@ -797,6 +820,8 @@ export class SessionRegistry {
 			return result;
 		} finally {
 			entry.state = "idle";
+			// The turn's lesson head must not linger: the next turn composes its own.
+			entry.headInjection.current = null;
 			turnCap.release();
 			dropIncompleteGate(entry);
 			entry.lastTurnEndedAt = Date.now();
