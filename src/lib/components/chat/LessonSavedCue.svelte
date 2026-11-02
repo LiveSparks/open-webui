@@ -65,7 +65,7 @@
 
 {#if visible}
 	<div
-		class="fixed bottom-24 left-1/2 z-40 -translate-x-1/2"
+		class="fixed bottom-32 left-1/2 z-40 -translate-x-1/2"
 		role="status"
 		transition:fade={{ duration: FADE_MS }}
 	>
