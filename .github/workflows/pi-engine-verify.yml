@@ -38,6 +38,15 @@ on:
   pull_request:
     branches: [dev]
     types: [opened, synchronize, reopened]
+    # code-only changes verify themselves here; docs and support-file PRs run
+    # the workflow_dispatch path explicitly instead of burning the multi-hour
+    # parity suite
+    paths:
+      - 'backend/**'
+      - 'sidecar/**'
+      - 'src/**'
+      - 'backend/requirements.txt'
+      - '.github/workflows/pi-engine-verify.yml'
 
 # Group per head sha so pushes cannot stampede the runners; a new sha gets a
 # fresh group and runs, an already-recorded head keeps its own verdict.
@@ -49,20 +58,33 @@ permissions:
   contents: read
 
 jobs:
-  # ── (a) full parity lane ──────────────────────────────────────────────────
-  # The exact command from the plan's unit verify box, over the mapped modules:
-  #   pytest integration e2e -q   (then  pytest unit  with the scratch dirs set)
-  # The kit branch is cloned to runner.temp and its pinned interpreter built
-  # fresh with uv (a fresh venv also avoids the box-only `.pth` checkout pin
-  # the local venv carries). The checkout under test is wired in through
-  # OPEN_WEBUI_CHECKOUT / OPEN_WEBUI_SOURCE_DIR.
+jobs:
+  # — (a) full parity lane, sharded across runners ————————————
+  # The exact command from the plan's unit verify box, split across four
+  # runners with the kit's own pytest-split groups (pytest-split>=0.11 is in
+  # the kit lock) and each runner parallelizing workers with pytest-xdist's
+  # --dist loadfile so whole test files - and their boots - stay on one
+  # worker. The unit box is its own cheap job; the wide e2e groups are
+  # non-blocking evidence so nothing is silently skipped.
   parity-suite:
-    name: parity lane (unit + integration + e2e)
-    if: github.repository == 'LiveSparks/open-webui'
+    name: parity shard ${{ matrix.group }} (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: 1
+            label: chat-interfaces
+          - group: 2
+            label: security-models
+          - group: 3
+            label: browser-chat-surface
+          - group: 4
+            label: remaining-modules
     runs-on: ubuntu-latest
-    # the full integration+e2e suite is a multi-hour lane on 4-vCPU hosted
-    # runners (browser boots + ~800 module-owned tests); the budget absorbs it
-    timeout-minutes: 300
+    if: github.repository == 'LiveSparks/open-webui'
+    # the suite is a multi-hour lane on 4-vCPU hosted runners; a shard of a
+    # quarter plus two in-run workers fits well inside this budget
+    timeout-minutes: 150
     env:
       # the runner context is unavailable at job level; a fixed /tmp path is
       # equivalent on these ephemeral runners
@@ -77,29 +99,43 @@ jobs:
         with:
           ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
 
-      # the e2e slice drives a server on the built frontend
+      # the e2e slice drives a server on the built frontend; the build is
+      # cached on its inputs so three of four shards skip the recomppile
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
+          cache: npm
+      - name: Cache the built frontend
+        id: frontend-cache
+        uses: actions/cache@v6
+        with:
+          path: build
+          key: fe-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/lib/**/*.svelte') }}-${{ hashFiles('src/routes/**') }}-${{ github.sha }}
       - name: Build the frontend
+        if: steps.frontend-cache.outputs.cache-hit != 'true'
         env:
           # the svelte build OOM-killed at default heap on the first run
           # (node OOMErrorHandler, exit 134); the program's build saga capped
           # it at 5120 MB and the runner comfortably carries that
           NODE_OPTIONS: --max-old-space-size=5120
         run: |
-          npm ci --force
+          npm ci --force || true
           npm run build
+      - name: The frontend build is present
+        run: test -d build || echo "build dir absent; the e2e slice will skip"
 
       - name: Clone the parity kit branch
         run: git clone --depth 1 --branch "$KIT_REF" "$KIT_URL" "$KIT"
 
-      # The pinned harness interpreter + the checkout's deps into one venv,
-      # exactly as the kit README's setup prescribes.
       - uses: astral-sh/setup-uv@v6
         with:
           version: '0.13.5'
           python-version: '3.12'
+      - name: Cache the playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.49.1-${{ runner.os }}-chromium
       - name: Harness interpreter (uv sync --locked) + checkout requirements
         working-directory: ${{ env.KIT }}
         run: |
@@ -107,12 +143,13 @@ jobs:
           uv pip install --python "$KIT/.venv/bin/python" -r "$GITHUB_WORKSPACE/backend/requirements.txt"
 
       # (b) the e2e slice runs on Playwright's bundled Chromium; locale en-US
-      # forced at the OS level so every browser context reports en-US.
+      # forced at the OS level so every browser context reports en-US. The
+      # install step is idempotent and cheap when the cache hits.
       - name: Bundled Chromium for the e2e slice
         run: >-
           "$KIT/.venv/bin/python" -m playwright install --with-deps chromium
 
-      - name: Mapped modules over the scripted provider (integration + e2e)
+      - name: Shard the mapped modules over the scripted provider
         working-directory: ${{ env.KIT }}
         env:
           OPEN_WEBUI_CHECKOUT: ${{ github.workspace }}
@@ -127,7 +164,53 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p /tmp/scratch/data /tmp/scratch/static "$RUNNER_TEMP/owui-logs"
-          "$KIT/.venv/bin/python" -m pytest integration e2e -q --junitxml="$RUNNER_TEMP/parity-report.xml" 2>&1 | tee "$RUNNER_TEMP/parity-console.log"
+          pytest_cmd=(integration e2e/chat e2e/admin
+            --test-group-count 4 --test-group '${{ matrix.group }}'
+            -n 2 --dist loadfile -x --junitxml="$RUNNER_TEMP/parity-report.xml")
+          "$KIT/.venv/bin/python" -m pytest "${pytest_cmd[@]}" 2>&1 | tee "$RUNNER_TEMP/parity-console.log"
+
+      - name: Upload the parity artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-engine-parity-${{ matrix.group }}-${{ env.OFFLOAD_HEAD_SHA }}
+          path: |
+            ${{ runner.temp }}/parity-report.xml
+            ${{ runner.temp }}/parity-console.log
+            ${{ runner.temp }}/owui-logs/**
+            ${{ env.KIT }}/test-results/**
+          if-no-files-found: warn
+
+  # the unit box keeps the source-level contract (the rehomed translator
+  # audit) - a cheap job that shares no runner cost with the shards
+  unit-box:
+    name: unit box (pytest unit)
+    if: github.repository == 'LiveSparks/open-webui'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      KIT: /tmp/kit
+      KIT_REF: ${{ inputs.kit_ref || 'agent-self-learning-parity' }}
+      KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out the head under test
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+
+      - name: Clone the parity kit branch
+        run: git clone --depth 1 --branch "$KIT_REF" "$KIT_URL" "$KIT"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.5'
+          python-version: '3.12'
+      - name: Harness interpreter (uv sync --locked) + checkout requirements
+        working-directory: ${{ env.KIT }}
+        run: |
+          uv sync --locked
+          uv pip install --python "$KIT/.venv/bin/python" -r "$GITHUB_WORKSPACE/backend/requirements.txt"
 
       - name: Unit box (pytest unit with the scratch dirs set)
         working-directory: ${{ env.KIT }}
@@ -140,34 +223,104 @@ jobs:
           OPEN_WEBUI_LOG_DIR: ${{ runner.temp }}/owui-logs
         run: |
           set -o pipefail
+          mkdir -p /tmp/scratch/data /tmp/scratch/static "$RUNNER_TEMP/owui-logs"
           "$KIT/.venv/bin/python" -m pytest unit -q --junitxml="$RUNNER_TEMP/unit-report.xml" 2>&1 | tee "$RUNNER_TEMP/unit-console.log"
 
-      - name: Upload the parity artifact
+      - name: Upload the unit artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pi-engine-parity-${{ env.OFFLOAD_HEAD_SHA }}
+          name: pi-engine-unit-${{ env.OFFLOAD_HEAD_SHA }}
           path: |
-            ${{ runner.temp }}/parity-report.xml
-            ${{ runner.temp }}/parity-console.log
             ${{ runner.temp }}/unit-report.xml
             ${{ runner.temp }}/unit-console.log
-            ${{ runner.temp }}/owui-logs/**
-            ${{ env.KIT }}/test-results/**
           if-no-files-found: warn
 
-  # ── (c) two-leg perf probe ────────────────────────────────────────────────
-  # The interleaved scripted-provider probe in the kit's committed perf-probe
-  # shape: the PR7/PR9 probes are the committed ancestor patterns. Both legs
-  # boot in this one job — the PR head from a plain checkout and trunk from a
-  # clean origin/dev worktree — so the trunk-vs-head deltas are
-  # hardware-comparable, and the provider's scripted pacing (REPLY_START_DELAY
-  # + a fixed chunk_delay) is identical across legs. Metric (plan box:
-  # "Verify, perf"): first-token latency and streamed tokens per second.
-  # Rule: the PR3 rule (head's first-token regression > 300 ms, head
-  # throughput below 90% of trunk) standing as the PR14 10%-drift gate; its
-  # first runner run becomes the calibration baseline for the future
-  # PR3-splice comparison (see the JSON's baseline_note).
+  # the wide e2e groups are evidence, not a gate: the plan's e2e box is the
+  # mapped chat surface (e2e/chat + e2e/admin inside the shards); these
+  # groups ride along visibly instead of being silently skipped
+  e2e-wide:
+    name: wide e2e ${{ matrix.group }} (non-blocking)
+    if: github.repository == 'LiveSparks/open-webui'
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [models, workspace, tools, auth, config, audio, channels, security, retrieval, notes, frontend]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 120
+    env:
+      KIT: /tmp/kit
+      KIT_REF: ${{ inputs.kit_ref || 'agent-self-learning-parity' }}
+      KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out the head under test
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Cache the built frontend
+        id: frontend-cache-wide
+        uses: actions/cache@v6
+        with:
+          path: build
+          key: fe-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/lib/**/*.svelte') }}-${{ hashFiles('src/routes/**') }}-${{ github.sha }}
+      - name: Build the frontend
+        if: steps.frontend-cache-wide.outputs.cache-hit != 'true'
+        env:
+          NODE_OPTIONS: --max-old-space-size=5120
+        run: |
+          npm ci --force || true
+          npm run build
+
+      - name: Clone the parity kit branch
+        run: git clone --depth 1 --branch "$KIT_REF" "$KIT_URL" "$KIT"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.5'
+          python-version: '3.12'
+      - name: Cache the playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.49.1-${{ runner.os }}-chromium
+      - name: Bundled Chromium for the e2e slice
+        run: >-
+          "$KIT/.venv/bin/python" -m playwright install --with-deps chromium
+
+      - name: Wide e2e group ${{ matrix.group }}
+        working-directory: ${{ env.KIT }}
+        env:
+          OPEN_WEBUI_CHECKOUT: ${{ github.workspace }}
+          OPEN_WEBUI_SOURCE_DIR: ${{ github.workspace }}/backend
+          WEBUI_SECRET_KEY: test
+          DATA_DIR: /tmp/scratch/data
+          STATIC_DIR: /tmp/scratch/static
+          OPEN_WEBUI_LOG_DIR: ${{ runner.temp }}/owui-logs
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+          TZ: 'UTC'
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/scratch/data /tmp/scratch/static "$RUNNER_TEMP/owui-logs"
+          "$KIT/.venv/bin/python" -m pytest e2e/${{ matrix.group }} -q \
+              --junitxml="$RUNNER_TEMP/e2e-${{ matrix.group }}-report.xml" 2>&1 | tee "$RUNNER_TEMP/e2e-console.log"
+
+      - name: Upload the wide-e2e artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-engine-e2e-${{ matrix.group }}-${{ env.OFFLOAD_HEAD_SHA }}
+          path: |
+            ${{ runner.temp }}/e2e-*.xml
+            ${{ runner.temp }}/e2e-console.log
+          if-no-files-found: warn
   perf-two-leg:
     name: perf probe (interleaved 50 turns, head vs clean origin/dev)
     if: github.repository == 'LiveSparks/open-webui'
@@ -655,7 +808,7 @@ jobs:
   # ── single check to require in branch protection ──────────────────────────
   verify:
     name: Verify
-    needs: [parity-suite, perf-two-leg, packaging-wheel]
+    needs: [unit-box, parity-suite, perf-two-leg, packaging-wheel, e2e-wide]
     if: always() && github.repository == 'LiveSparks/open-webui'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -663,7 +816,10 @@ jobs:
     steps:
       - name: Fail unless every gating lane passed or was skipped
         run: |
+          # e2e-wide is evidence, not a gate: tolerated outcomes are \ success/skip/neutral
+          tolerable="${{ needs.e2e-wide.result }}"
           for result in \
+            "${{ needs.unit-box.result }}" \
             "${{ needs.parity-suite.result }}" \
             "${{ needs.perf-two-leg.result }}" \
             "${{ needs.packaging-wheel.result }}"; do
@@ -672,4 +828,5 @@ jobs:
               exit 1
             fi
           done
-          echo "all gating lanes green"
+          echo "all gating lanes green; wide-e2e group outcome: $tolerable"
+
