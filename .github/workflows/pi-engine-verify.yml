@@ -35,6 +35,10 @@ on:
         description: 'parity kit branch to clone (default: the fleet lane kit line)'
         required: false
         default: agent-self-learning-parity
+      run_wide_e2e:
+        description: 'also run the wide e2e evidence groups (release-gate arms; the per-verification shape leaves them out)'
+        required: false
+        default: 'false'
   pull_request:
     branches: [dev]
     types: [opened, synchronize, reopened]
@@ -326,7 +330,7 @@ jobs:
   # groups ride along visibly instead of being silently skipped
   e2e-wide:
     name: wide e2e ${{ matrix.group }} (non-blocking)
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'LiveSparks/open-webui'
+    if: inputs.run_wide_e2e == 'true' && github.event_name == 'workflow_dispatch' && github.repository == 'LiveSparks/open-webui'
     strategy:
       fail-fast: false
       matrix:
