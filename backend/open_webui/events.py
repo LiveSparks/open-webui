@@ -374,6 +374,9 @@ class EventDefinitions(BaseModel):
     MEMORY_DELETED: EventDefinition = EventDefinition(
         name='memory.deleted', description='A memory was deleted.', message='Memory deleted'
     )
+    LESSON_SAVED: EventDefinition = EventDefinition(
+        name='lesson.saved', description='An agent self-learning lesson was saved.', message='Lesson saved'
+    )
     MEMORY_RESET: EventDefinition = EventDefinition(
         name='memory.reset', description='A memory was reset.', message='Memory reset'
     )

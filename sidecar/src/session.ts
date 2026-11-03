@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
 import { randomUUID } from "node:crypto";
 import { setInterval } from "node:timers";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -25,8 +26,29 @@ import { Type } from "@earendil-works/pi-ai";
 import type { AgentTurnDecision } from "@earendil-works/pi-agent-core";
 import type { SidecarConfig } from "./config.ts";
 import { validateChatId, type LoopbackBinding } from "./config.ts";
+import { prepareInjection, type PreparedInjection } from "./learning/injector.ts";
+import {
+	learningDirFor,
+	ObservationLog,
+	scrubSecrets,
+	summarizeAssistant,
+	summarizeToolCalls,
+	type TurnObservation,
+} from "./learning/observer.ts";
+import { ConfidenceLedger } from "./learning/ledger.ts";
+import { Reflector } from "./learning/reflector.ts";
 import { buildMachineTools, machineChatRoot } from "./machineTools.ts";
-import { createTurnController, buildTurnExtension, type TurnController, type TurnEnvelope, type TurnState, applyTurnEnvelope } from "./providers.ts";
+import {
+	applyTurnEnvelope,
+	buildHeadInjectionExtension,
+	buildTurnExtension,
+	createHeadInjectionState,
+	createTurnController,
+	type HeadInjectionState,
+	type TurnController,
+	type TurnEnvelope,
+	type TurnState,
+} from "./providers.ts";
 
 /**
  * The bridge seam, proven end to end by the live lanes: a custom tool the chat
@@ -194,6 +216,10 @@ interface ChatEntry {
 	bridge: BridgeControl;
 	/** Set by abort() while a run is in flight, so prompt() can report it. */
 	abortRequested: boolean;
+	/** Scrubbed tool-call summaries the learning loop observes per session. */
+	/** Scrubbed tool-call summaries the learning loop observes per session. */
+	recentToolCalls: Array<{ name: string; args: string; error?: string }>;
+
 	/** Set before the entry's session is disposed. An in-flight run that
 	 * resolves afterwards (a sidecar shutdown or a host rebuild aborts pi
 	 * silently, but pi still lets prompt() settle) did not finish: report
@@ -201,6 +227,10 @@ interface ChatEntry {
 	disposed?: boolean;
 	/** The per-turn model/key/header handoff (PR6); bound when the session carries a loopback binding. */
 	turn: TurnController | undefined;
+	/** The per-turn head slot (PR11 fix round 1): the lesson block the head
+	 * extension projects onto the provider request head; null before set and
+	 * after every run, and never the user turn. */
+	headInjection: HeadInjectionState;
 	/** Bumped on every get()/prompt()/fork(); the LRU clock for the cap. */
 	lastUsedAt: number;
 	/** Monotonic tiebreaker over lastUsedAt: a strict LRU order. */
@@ -233,6 +263,10 @@ export interface PromptOptions {
 }
 
 export type SessionEventHandler = (event: unknown) => void;
+
+/** The env kill switch the sidecar keeps for its own boot: the admin and
+ * per-user switches live in OWUI and govern per chat. */
+const LEARNING_ENV_ON = (process.env.AGENT_LEARNING ?? "on").toLowerCase() !== "off";
 
 export class SessionConflictError extends Error {
 	constructor(chatId: string) {
@@ -332,6 +366,12 @@ export class SessionRegistry {
 		return guarded;
 	}
 	private readonly sweeper: ReturnType<typeof setInterval>;
+	/** Self-learning loop state (PR11): the scrubbed observation log, the
+	 * client-side confidence ledger, and the reflect job, all under one
+	 * learning dir next to the sessions root. */
+	private readonly learningLog: ObservationLog;
+	private readonly learningLedger: ConfidenceLedger;
+	private readonly learningReflector: Reflector | undefined;
 
 	constructor(
 		private readonly config: SidecarConfig,
@@ -343,6 +383,14 @@ export class SessionRegistry {
 		// unref keeps process exit unblocked in specs.
 		this.sweeper = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
 		this.sweeper.unref();
+		const learningDir = learningDirFor(this.config.sessionsRoot);
+		this.learningLog = new ObservationLog(learningDir);
+		this.learningLedger = new ConfidenceLedger(learningDir);
+		this.learningReflector = new Reflector(
+			learningDir,
+			join(learningDir, "observation.jsonl"),
+			this.learningLedger,
+		);
 	}
 
 	get sessionCount(): number {
@@ -472,7 +520,8 @@ export class SessionRegistry {
 		const sessionCwd = machineBound ? machineChatRoot(chatId) : this.config.cwd;
 		const bridge: BridgeControl = { sync: async () => undefined };
 		const turnState: TurnState = { current: undefined };
-		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge, turnState);
+		const headInjection = createHeadInjectionState();
+		const resourceLoader = this.bridgeResourceLoader(system, gate, bindingRef, bridge, turnState, headInjection);
 		// Loads the factories (bridge registrar, MCP connector, codemode, tool
 		// search) and runs extensionsOverride, which splices the gate in.
 		await resourceLoader.reload();
@@ -522,11 +571,13 @@ export class SessionRegistry {
 			machineBound,
 			bridge,
 			turn,
+			headInjection,
 			abortRequested: false,
 			lastUsedAt: now,
 			lastUsedSeq: this.touch(),
 			lastTurnEndedAt: now,
 			hasBackgroundChildren: () => this.hasUndeliveredChildren(chatId),
+			recentToolCalls: [],
 		};
 		this.chats.set(chatId, entry);
 		return entry;
@@ -545,6 +596,7 @@ export class SessionRegistry {
 		bindingRef: BindingRef,
 		bridge: BridgeControl,
 		turnState: TurnState,
+		headInjection: HeadInjectionState,
 	) {
 		const extensionFactories: InlineExtension[] = [];
 		if (bindingRef.current) {
@@ -552,6 +604,8 @@ export class SessionRegistry {
 				buildLoopbackBridgeExtension(bindingRef, bridge),
 				// The per-request seams (PR6, issue 23): header map + payload params.
 				buildTurnExtension(turnState),
+				// The per-turn head injection (PR11): the lessons block rides the head.
+				buildHeadInjectionExtension(headInjection),
 				createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }) }),
 				createCodemodeExtension({ mode: "on" }),
 				createToolSearchExtension(),
@@ -674,6 +728,34 @@ export class SessionRegistry {
 		entry.lastUsedSeq = this.touch();
 		let lastStopReason: string | undefined;
 		const turnCap = installTurnCap(entry.session, options?.maxTurns);
+		// The injection hook (PR11): before the model sees anything, the store
+		// answers the retrieval query on the user's message plus session
+		// activity; short of the relevance floor nothing rides the head, and
+		// the composed block never exceeds the char budget (injector duty).
+		const observedUserText = text;
+		let injectedLessonIds: string[] = [];
+		// Learning was on for this turn, as the store just said. The observe
+		// hook below stops when the store said off.
+		let learningRan = false;
+		const turnStartedAt = Date.now();
+		if (LEARNING_ENV_ON && entry.bindingRef.current) {
+			try {
+				const prepared = await this.injectBeforeTurn(entry, text);
+				if (prepared) {
+					learningRan = prepared.enabled;
+					if (prepared.block) {
+						// Fix round 1: the block rides the head channel (the same
+						// system-side head the prompt handoff of PR3/PR8 rides),
+						// never the user turn: the head projection keeps the lesson
+						// off the transcript and off the stored chat record.
+						entry.headInjection.current = prepared.block;
+						injectedLessonIds = prepared.injectedLessonIds;
+					}
+				}
+			} catch {
+				// A broken store must never break the turn: run without lessons.
+			}
+		}
 		try {
 			// Apply the turn's resolved model/key/header envelope (PR6): every
 			// turn resolves fresh, so a model switch or a rotated key is simply
@@ -691,6 +773,20 @@ export class SessionRegistry {
 			const unsubscribe = entry.session.subscribe((event) => {
 				if (event.type === "message_end" && event.message?.role === "assistant") {
 					lastStopReason = String((event.message as { stopReason?: string }).stopReason);
+				}
+				// The observer's tool summaries ride the same event stream the run
+				// already emits; nothing extra asks the session anything.
+				if (event.type === "tool_execution_start") {
+					entry.recentToolCalls.push({
+						name: event.toolName,
+						args: typeof event.args === "string" ? event.args : JSON.stringify(event.args ?? {}),
+					});
+					if (entry.recentToolCalls.length > 12) entry.recentToolCalls.shift();
+				} else if (event.type === "tool_execution_end" && event.isError) {
+					const last = entry.recentToolCalls.at(-1);
+					if (last && last.name === event.toolName && !last.error) {
+						last.error = String(event.result ?? "tool error");
+					}
 				}
 				try {
 					onEvent(event);
@@ -712,13 +808,26 @@ export class SessionRegistry {
 				sessionFile: entry.session.sessionFile,
 				error: error instanceof Error ? error.message : String(error),
 			};
+			this.observeAfterTurn(
+				entry,
+				observedUserText,
+				injectedLessonIds,
+				turnStartedAt,
+				learningRan,
+				result.reason,
+				result.error,
+			);
 			return result;
 		} finally {
 			entry.state = "idle";
+			// The turn's lesson head must not linger: the next turn composes its own.
+			entry.headInjection.current = null;
 			turnCap.release();
 			dropIncompleteGate(entry);
 			entry.lastTurnEndedAt = Date.now();
 		}
+		// The run's outcome first: the observation records the same reason the
+		// caller receives, never the provider's own stop label.
 		const runDisposed = Boolean(entry.disposed) && !entry.abortRequested;
 		const reason: PromptResult["reason"] =
 			runDisposed
@@ -730,6 +839,15 @@ export class SessionRegistry {
 						: lastStopReason === "error"
 							? "error"
 							: "completed";
+		this.observeAfterTurn(
+			entry,
+			observedUserText,
+			injectedLessonIds,
+			turnStartedAt,
+			learningRan,
+			reason,
+			turnCap.fired() || undefined,
+		);
 		return {
 			reason,
 			sessionId: entry.session.sessionId,
@@ -738,6 +856,68 @@ export class SessionRegistry {
 			...(runDisposed ? { error: "Agent sidecar is shutting down." } : {}),
 			...(turnCap.fired() ? { error: turnCap.fired() as string } : {}),
 		};
+	}
+
+	/**
+	 * The injection hook (PR11): one store query per turn while learning is
+	 * on. The store is the single source of truth for the switches, so the
+	 * query runs every bound turn; off costs a small state answer.
+	 */
+	private async injectBeforeTurn(entry: ChatEntry, message: string): Promise<PreparedInjection | null> {
+		const binding = entry.bindingRef.current;
+		if (!binding) return null;
+		const prepared = await prepareInjection(
+			binding,
+			message,
+			entry.recentToolCalls.map((call) => call.name),
+		);
+		if (prepared.injectedLessonIds.length) {
+			for (const lessonId of prepared.injectedLessonIds) {
+				this.learningLedger.recordInjection(lessonId);
+			}
+		}
+		return prepared;
+	}
+
+	/**
+	 * The observation hook (PR11): scrub, truncate, and append the turn; the
+	 * reflect job runs outside the loop, fire-and-forget, and a mid-job crash
+	 * leaves the log cursor where it was (the next run resumes it).
+	 */
+	private observeAfterTurn(
+		entry: ChatEntry,
+		userText: string,
+		injectedLessonIds: string[],
+		turnStartedAt: number,
+		learningRan: boolean,
+		outcome: string,
+		error?: string,
+	): void {
+		const binding = entry.bindingRef.current;
+		if (!binding || !LEARNING_ENV_ON || !learningRan) return;
+		const observation: TurnObservation = {
+			ts: new Date().toISOString(),
+			chatId: entry.chatId,
+			sessionId: entry.session.sessionId,
+			userText: scrubSecrets(userText),
+			assistantText: summarizeAssistant(entry.session.getLastAssistantText()),
+			toolCalls: summarizeToolCalls(entry.recentToolCalls),
+			injectedLessonIds,
+			outcome,
+			...(error ? { error: String(error).slice(0, 300) } : {}),
+			durationMs: Math.max(0, Date.now() - turnStartedAt),
+		};
+		try {
+			this.learningLog.append(observation);
+		} catch (logError) {
+			console.error("learning: observation log append failed", logError);
+			return; // the reflect cursor below must never skip an unlogged turn
+		}
+		if (this.learningReflector) {
+			void this.learningReflector.drain(binding).catch((drainError) => {
+				console.error("learning: reflect drain deferred to the next run", drainError);
+			});
+		}
 	}
 
 	async steer(chatId: string, text: string): Promise<string> {

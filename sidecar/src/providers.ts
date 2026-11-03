@@ -265,6 +265,35 @@ export function wireTurnCredentials(session: AgentSession, binding: () => Loopba
 	};
 }
 
+/** The per-turn head slot (PR11, fix round 1): the lesson block the injector
+ * composed for the current turn, consumed by the head extension at prompt
+ * start and cleared when the run ends, so nothing lingers on a later turn. */
+export interface HeadInjectionState {
+	current: string | null;
+}
+
+export function createHeadInjectionState(): HeadInjectionState {
+	return { current: null };
+}
+
+/**
+ * The per-turn head injection extension (PR11, fix round 1): the lesson block
+ * rides the same head channel the prompt head (PR3/PR8) rides — pi's own
+ * per-turn system assembly. At prompt start the block is appended to the
+ * fully rendered system prompt, which pi projects as the leading request head
+ * without recording it as a transcript turn: the user turn stays the user's
+ * own text and the provider request still carries the lesson head.
+ */
+export function buildHeadInjectionExtension(state: HeadInjectionState): ExtensionFactory {
+	return (pi) => {
+		pi.on("before_agent_start", (event) => {
+			const block = state.current;
+			if (!block) return undefined;
+			return { systemPrompt: `${event.systemPrompt.trimEnd()}\n\n${block.trimEnd()}` };
+		});
+	};
+}
+
 /**
  * The per-request seams (issue 23): the header map applies after pi has
  * assembled its own (caller values win; a null deletes a default, which is
