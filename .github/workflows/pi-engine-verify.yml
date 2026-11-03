@@ -172,6 +172,9 @@ jobs:
             3) GROUP='e2e/chat e2e/admin' ;;
             4) GROUP='e2e/models e2e/workspace e2e/tools e2e/auth e2e/config e2e/audio e2e/channels e2e/security e2e/retrieval e2e/knowledge e2e/frontend e2e/imports e2e/images' ;;
           esac
+          echo "=== collect probe ==="
+          "$KIT/.venv/bin/python" -m pytest ${GROUP} -q --collect-only 2>&1 | tail -6
+          echo "=== run the shard ==="
           "$KIT/.venv/bin/python" -m pytest ${GROUP} -q \
               -n 2 --dist loadfile --junitxml="$RUNNER_TEMP/parity-report.xml" 2>&1 \
               | tee "$RUNNER_TEMP/parity-console.log"
