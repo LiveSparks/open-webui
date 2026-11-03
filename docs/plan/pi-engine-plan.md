@@ -839,6 +839,23 @@ The lane runs at the PR head with a scratch data directory and one chat it owns.
 - [ ] Rebased onto current trunk after the verdict, patch-id unchanged.
 - [ ] After the operator's click the root squash-merges PR14.
 
+## Actions offload (the ci/offload lane)
+
+From this point the program's heavy verification rounds leave the operator's 12 GB box: the parity suite boots the mapped modules, the browser slice, the two-leg perf probe, and the wheel smoke on GitHub-hosted runners. The lane lives in `.github/workflows/pi-engine-verify.yml` (workflow_dispatch, plus pull_request into dev), and gates through one `Verify` result check. Standing rules it inherits:
+
+- **No secrets.** Every lane drives the parity kit's scripted provider (the Gate 4 standing shape), so the workflow must never reference a repository secret — if a lane looks like it needs one, it is reported and parked, not wired.
+- **Upstream never runs our lanes.** Every job wears `if: github.repository == 'LiveSparks/open-webui'`.
+- **Concurrency groups per head sha**, so pushes cannot stampede the runners and each recorded head keeps its own verdict, taken at that exact sha.
+- **The harness interpreter is pinned**: the kit branch `agent-self-learning-parity` (cloned anonymously over plain https from LiveSparks/open-webui-tests), Python 3.12, uv 0.13.5, `uv sync --locked` — the shape the calibrated local venv ran.
+
+Jobs:
+
+1. **parity lane** — the exact command of the box's unit verify round (`python -m pytest integration e2e -q`, then `pytest unit`, scratch `DATA_DIR`/`STATIC_DIR`, `WEBUI_SECRET_KEY=test`, `OPEN_WEBUI_SOURCE_DIR` at the checkout's backend), plus the built frontend and Playwright's bundled Chromium for the e2e slice, locale en-US forced at the OS level. Artifact: junit reports, console logs, scratch server logs, e2e traces.
+2. **perf probe** — the interleaved scripted-provider script in the kit's committed perf-probe shape (PR7/PR9 probes are the patterns): both legs — the PR head and a clean `origin/dev` worktree — boot in the same job before the first timed turn, so trunk-vs-head deltas are hardware-comparable. Fifty interleaved turns per leg (ten per side per round, starting leg swapped per round), first-token latency and streamed tokens per second, PR3's rule standing as the 10% drift gate. Artifact: `perf-probe.json` + log; the first Actions run calibrates the PR3-splice baseline on runner hardware.
+3. **packaging smoke** — wheel built (the hatch hook compiles the frontend and, on Node 22.19+, the sidecar), pip-installed into a clean venv, contents asserted (sidecar `dist`, pruned `node_modules`, `sidecar_launch.py`, the console script), and `open-webui serve --help` booted — bare-metal zero-switch, standing order 16. A separate `ubuntu-24.04-arm` leg is NEEDS-REVIEW and non-blocking until its first run says whether the Node stages are arm-clean.
+
+The box keeps nothing heavy: no parity suite runs, no boots, no docker there anymore. Cheap checks only (YAML parse, shellcheck on the inline scripts, `uv sync --dry-run` against the kit lock, interpreter resolution) stay allowed on the box before every change to the workflow.
+
 ## Close the program
 
 - [ ] Every box above is checked with its evidence.
