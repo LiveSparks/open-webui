@@ -278,7 +278,9 @@ jobs:
                   os.environ["OPEN_WEBUI_CHECKOUT"] = str(root)
                   os.environ["OPEN_WEBUI_SOURCE_DIR"] = str(backend)
                   self.upstream, shutdown = serve_upstream()
-                  stack.push(shutdown)
+                  # push expects exception-triple callbacks; a zero-arg
+                  # shutdown registers via callback
+                  stack.callback(shutdown)
                   self.instance = stack.enter_context(
                       contextlib.contextmanager(launch)(self.upstream, QUIET_TASKS)
                   )
