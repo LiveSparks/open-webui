@@ -167,10 +167,10 @@ jobs:
           # durations file, no plugin state; batch mode (no -x) so the fix pass
           # reads one class list per lane instead of N round trips
           case '${{ matrix.group }}' in
-            1) GROUP='integration/chat integration/auth integration/config integration/apps integration/audio integration/channels integration/imports integration/footprint integration/images integration/memory integration/notes integration/tasks' ;;
-            2) GROUP='integration/security integration/models integration/retrieval integration/deps integration/resolver integration/migrations integration/tools' ;;
+            1) GROUP='integration/chat integration/auth integration/config integration/apps integration/audio integration/channels integration/imports integration/footprint integration/images integration/memory integration/notes integration/resilience integration/test_chat_completions.py integration/test_dep_install_and_startup.py integration/test_harness.py integration/test_notes.py integration/test_tasks.py' ;;
+            2) GROUP='integration/security integration/models integration/retrieval integration/deps integration/resolver integration/migrations integration/tools integration/workspace' ;;
             3) GROUP='e2e/chat e2e/admin' ;;
-            4) GROUP='e2e/models e2e/workspace e2e/tools e2e/auth e2e/config e2e/audio e2e/channels e2e/security e2e/retrieval e2e/knowledge e2e/frontend e2e/imports e2e/images' ;;
+            4) GROUP='e2e/models e2e/workspace e2e/tools e2e/auth e2e/config e2e/audio e2e/channels e2e/security e2e/retrieval e2e/knowledge e2e/frontend e2e/imports e2e/images e2e/apps e2e/memory e2e/migrations e2e/test_chat_journeys.py e2e/test_page_accessibility.py' ;;
           esac
           echo "=== collect probe ==="
           "$KIT/.venv/bin/python" -m pytest ${GROUP} -q --collect-only 2>&1 | tail -6
