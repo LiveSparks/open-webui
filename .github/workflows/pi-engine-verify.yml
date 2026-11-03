@@ -56,6 +56,9 @@ jobs:
       # the runner context is unavailable at job level; a fixed /tmp path is
       # equivalent on these ephemeral runners
       KIT: /tmp/kit
+      # the parity kit is public and branch-named; no token, no extra vars
+      KIT_REF: agent-self-learning-parity
+      KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
       OFFLOAD_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out the head under test
@@ -158,6 +161,9 @@ jobs:
       # the runner context is unavailable at job level; a fixed /tmp path is
       # equivalent on these ephemeral runners
       KIT: /tmp/kit
+      # the parity kit is public and branch-named; no token, no extra vars
+      KIT_REF: agent-self-learning-parity
+      KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
       OFFLOAD_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out the head under test
