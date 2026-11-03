@@ -768,43 +768,6 @@ jobs:
   # Non-blocking ARM wheel build, marked NEEDS-REVIEW: the first Actions run
   # answers whether the frontend/sidecar Node stages are arm-clean at all.
   # Nothing here gates a roots verdict until that is judged.
-  packaging-arm:
-    name: "[NEEDS-REVIEW, non-blocking] wheel on ubuntu-24.04-arm"
-    if: github.repository == 'LiveSparks/open-webui'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
-    continue-on-error: true
-    env:
-      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
-    steps:
-      - name: Check out the head under test
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-      - name: Build the wheel (arm)
-        run: |
-          set -o pipefail
-          python -m pip install --quiet build
-          python -m build --wheel --outdir dist 2>&1 | tee "$RUNNER_TEMP/arm-build.log"
-
-      - name: Upload the arm artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pi-engine-wheel-arm-${{ env.OFFLOAD_HEAD_SHA }}
-          path: |
-            ${{ github.workspace }}/dist/open_webui-*.whl
-            ${{ runner.temp }}/arm-build.log
-          if-no-files-found: warn
-
-  # ── single check to require in branch protection ──────────────────────────
   verify:
     name: Verify
     needs: [unit-box, parity-suite, perf-two-leg, packaging-wheel, e2e-wide]
