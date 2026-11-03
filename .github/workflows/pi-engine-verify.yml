@@ -1,10 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # pi engine — Actions offload verification
 #
-# The pi-engine program's heavy verification rounds (the full parity lane, the
-# interleaved perf probe, the wheel smoke) used to run on the operator's
-# 12 GB box and stopped fitting there. This workflow moves them onto GitHub-
-# hosted runners, starting with the PR14 deletion-gate root verification.
+# The pi-engine program's verification moved off the operator's 12 GB box onto
+# GitHub-hosted runners. The per-verification shape (every dispatch default) is
+# the lean three: unit box, perf probe, wheel pack — about ten minutes. The
+# parity shard matrix and the wide e2e groups sit behind explicit dispatch
+# inputs (run_parity_shards, run_wide_e2e), and a shard stops at the first 15
+# failures, so a red report arrives in minutes, not at a runner timeout.
 #
 # Standing context:
 #   - no secrets are needed: every lane drives the parity kit's scripted model
@@ -39,6 +41,10 @@ on:
         description: 'also run the wide e2e evidence groups (release-gate arms; the per-verification shape leaves them out)'
         required: false
         default: 'false'
+      run_parity_shards:
+        description: 'also run the full parity shard matrix (deliberate maintenance arms only; the lean verification leaves them out)'
+        required: false
+        default: 'false'
 
 # Dispatch-only by operator ruling: nothing arms this matrix from a push or a
 # pull_request. A head needing verification gets its own deliberate dispatch.
@@ -71,10 +77,10 @@ jobs:
             nonblocking: true
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.nonblocking == true }}
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'LiveSparks/open-webui'
-    # the suite is a multi-hour lane on 4-vCPU hosted runners; a shard of a
-    # quarter plus two in-run workers fits well inside this budget
-    timeout-minutes: 150
+    if: github.event_name == 'workflow_dispatch' && inputs.run_parity_shards == 'true' && github.repository == 'LiveSparks/open-webui'
+    # a shard is a deliberate arm (run_parity_shards) and stops at the first
+    # 15 failures: a red report arrives in minutes, not at a runner timeout
+    timeout-minutes: 60
     env:
       # the runner context is unavailable at job level; a fixed /tmp path is
       # equivalent on these ephemeral runners
@@ -166,7 +172,7 @@ jobs:
           "$KIT/.venv/bin/python" -m pytest ${GROUP} -q --collect-only 2>&1 | tail -6
           echo "=== run the shard ==="
           "$KIT/.venv/bin/python" -m pytest ${GROUP} -q \
-              -n 2 --dist loadfile --junitxml="$RUNNER_TEMP/parity-report.xml" 2>&1 \
+              -n 2 --dist loadfile --maxfail=15 --junitxml="$RUNNER_TEMP/parity-report.xml" 2>&1 \
               | tee "$RUNNER_TEMP/parity-console.log"
 
       - name: Upload the parity artifact
@@ -314,7 +320,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p /tmp/scratch/data /tmp/scratch/static "$RUNNER_TEMP/owui-logs"
-          "$KIT/.venv/bin/python" -m pytest e2e/${{ matrix.group }} -q \
+          "$KIT/.venv/bin/python" -m pytest e2e/${{ matrix.group }} -q --maxfail=15 \
               --junitxml="$RUNNER_TEMP/e2e-${{ matrix.group }}-report.xml" 2>&1 | tee "$RUNNER_TEMP/e2e-console.log"
 
       - name: Upload the wide-e2e artifact
