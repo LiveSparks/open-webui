@@ -266,6 +266,19 @@ jobs:
 
           os.environ.setdefault("TMPDIR", os.environ.get("RUNNER_TEMP", "/tmp"))
 
+          # receipt stamps: the fake records no timing itself, so the probe
+          # stamps the arrival of every OWUI outbound request at the fake
+          class _TimedList(list):
+              receipts: list[tuple[float, str]] = []
+
+              def append(self, entry):
+                  _TimedList.receipts.append((time.monotonic(), entry.path))
+                  return list.append(self, entry)
+
+              def clear(self):
+                  _TimedList.receipts.clear()
+                  return list.clear(self)
+
           from harness.actors import admin_of
           from harness.chat import send_message
           from harness.instance import launch
@@ -287,6 +300,7 @@ jobs:
                   os.environ["OPEN_WEBUI_CHECKOUT"] = str(root)
                   os.environ["OPEN_WEBUI_SOURCE_DIR"] = str(backend)
                   self.upstream, shutdown = serve_upstream()
+                  self.upstream.requests = _TimedList()
                   # push expects exception-triple callbacks; a zero-arg
                   # shutdown registers via callback
                   stack.callback(shutdown)
@@ -347,6 +361,28 @@ jobs:
                   if sample["done"]:
                       break
                   time.sleep(0.005)
+              else:
+                  # turn timeout: the decisive triad before the assert
+                  kinds: dict[str, int] = {}
+                  for entry in leg.socket.events:
+                      data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+                      key = f"{entry.get('type')}:{data.get('type')}"
+                      kinds[key] = kinds.get(key, 0) + 1
+                  print(f"[probe abst] {leg.name} turn {turn_index}: frames total={len(leg.socket.events)} "
+                        f"kinds={kinds}", flush=True)
+                  print(f"[probe abst] {leg.name} turn {turn_index}: provider receipts="
+                        f"{_TimedList.receipts}", flush=True)
+                  with leg.admin.client() as client:
+                      try:
+                          stored_note = client.get(f"/api/v1/chats/{leg.chat_id}")
+                          note = stored_note.json() or {}
+                          chat = note.get("chat") or note or {}
+                          messages = chat.get("messages") or []
+                          last = messages[-1] if messages else {}
+                          print(f"[probe abst] {leg.name} turn {turn_index}: stored done={last.get('done')} "
+                              f"content_len={len(last.get('content') or '')} model={chat.get('model')}", flush=True)
+                      except Exception as e:  # noqa: BLE001
+                          print(f"[probe abst] {leg.name} turn {turn_index}: stored read failed: {e}", flush=True)
               leg.chat_id = turn.chat_id
               leg.parent_id = turn.assistant_message_id
               if not sample["done"] or sample["first_token_ms"] is None:
