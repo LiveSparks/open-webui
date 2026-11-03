@@ -71,6 +71,11 @@ jobs:
         with:
           node-version: '22'
       - name: Build the frontend
+        env:
+          # the svelte build OOM-killed at default heap on the first run
+          # (node OOMErrorHandler, exit 134); the program's build saga capped
+          # it at 5120 MB and the runner comfortably carries that
+          NODE_OPTIONS: --max-old-space-size=5120
         run: |
           npm ci --force
           npm run build
@@ -431,6 +436,9 @@ jobs:
       - name: Run the two-leg probe (both legs on this runner, one process)
         env:
           OPEN_WEBUI_LOG_DIR: ${{ runner.temp }}/owui-logs
+          # the probe imports the kit's harness package from its root while
+          # sys.path[0] is the script's own perf/ directory
+          PYTHONPATH: ${{ env.KIT }}
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/owui-logs"
