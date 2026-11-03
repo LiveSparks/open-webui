@@ -35,6 +35,11 @@ export interface LedgerState {
 	injections: number;
 	/** Epoch ms of the last pulse; the decay clock. */
 	updatedAt: number;
+	/** Gate 9 content revision: the lesson was superseded by a store-side
+	 * rewrite and must not keep paying in numbers. */
+	retracted?: boolean;
+	/** The replacement lesson the retraction pointed at. */
+	supersededBy?: string;
 }
 
 export interface LedgerSignals {
@@ -97,6 +102,7 @@ export class ConfidenceLedger {
 						confirmations: state.confirmations ?? 0,
 						contradictions: state.contradictions ?? 0,
 						injections: state.injections ?? 0,
+						...(state.retracted ? { retracted: true, supersededBy: state.supersededBy } : {}),
 						updatedAt: state.updatedAt,
 					};
 				}
@@ -146,6 +152,7 @@ export class ConfidenceLedger {
 	pulse(lessonId: string, signals: LedgerSignals, now = Date.now()): LedgerState {
 		this.load();
 		const state = this.state(lessonId, now);
+		if (state.retracted) return state; // a retracted lesson never moves again
 		if (signals.userConfirm) {
 			state.confidence += SIGNAL_WEIGHTS.userConfirm;
 		}
@@ -171,6 +178,20 @@ export class ConfidenceLedger {
 			lessonId,
 			state: this.pulse(lessonId, signals, now),
 		}));
+	}
+
+	/** The Gate 9 retraction: the lesson's content contradictions reached the
+	 * revision threshold, the loop settled its number, and a store-side
+	 * rewrite supersedes it. Counters and confidence stand as they were. */
+	retract(lessonId: string, supersededBy: string, now = Date.now()): LedgerState {
+		this.load();
+		const state = this.state(lessonId, now);
+		state.retracted = true;
+		state.supersededBy = supersededBy;
+		state.updatedAt = now;
+		this.store[lessonId] = state;
+		this.persist();
+		return state;
 	}
 
 	recordInjection(lessonId: string, now = Date.now()): LedgerState {
