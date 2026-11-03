@@ -109,22 +109,6 @@ fi
 
 compose_files=("-f" "docker-compose.yaml")
 
-if [[ "$enable_gpu" == true ]]; then
-  if ! [[ "$gpu_count" =~ ^([0-9]+|all)$ ]]; then
-    echo >&2 "Error: Invalid GPU count '${gpu_count}'. Must be a number or 'all'."
-    exit 1
-  fi
-  export OLLAMA_GPU_DRIVER
-  OLLAMA_GPU_DRIVER=$(detect_gpu_driver)
-  export OLLAMA_GPU_COUNT="$gpu_count"
-  compose_files+=("-f" "docker-compose.gpu.yaml")
-fi
-
-if [[ "$enable_api" == true ]]; then
-  export OLLAMA_WEBAPI_PORT="$api_port"
-  compose_files+=("-f" "docker-compose.api.yaml")
-fi
-
 if [[ -n "$data_dir" ]]; then
   export OLLAMA_DATA_DIR="$data_dir"
   compose_files+=("-f" "docker-compose.data.yaml")

@@ -911,7 +911,14 @@ async def resolve_agent_interaction(metadata: dict) -> StreamingResponse:
         )
     try:
         result = await interact_session(_client(), chat_id, call_id, action)
-        log.info('agent bridge: interaction %s for %s/%s resolved: %s', action, chat_id, message_id, result)
+        log.info(
+            'agent bridge: interaction %s for %s/%s resolved as %s (id %s)',
+            action,
+            chat_id,
+            message_id,
+            result.get('status') if isinstance(result, dict) else type(result).__name__,
+            result.get('id') if isinstance(result, dict) else None,
+        )
     except Exception:
         log.exception('agent bridge: interaction delivery failed for %s/%s', chat_id, message_id)
     return StreamingResponse(
