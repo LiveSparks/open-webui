@@ -358,9 +358,17 @@ def _strip_child_tools(tools_dict: dict[str, dict], chat) -> dict[str, dict]:
     meta = chat.meta or {}
     if meta.get('internal') is not True or meta.get('type') != 'subagent':
         return tools_dict
-    from open_webui.utils.subagents import MUTATING_MEMORY_TOOLS
-
-    stripped = {'delegate_task', 'timer', *MUTATING_MEMORY_TOOLS}
+    # The four mutating memory tools are inlined (PR14): the Python sidecar
+    # subagents.py constant they mirrored is deleted with the old loop. A
+    # child's attempt to call one still lands as 'tool not bridged'.
+    stripped = {
+        'delegate_task',
+        'timer',
+        'add_memory',
+        'delete_memory',
+        'replace_memory_content',
+        'update_memory',
+    }
     return {
         name: tool_dict
         for name, tool_dict in tools_dict.items()

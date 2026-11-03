@@ -935,9 +935,17 @@ async def get_builtin_tools(
         builtin_functions.append(notify)
 
     if getattr(request.state, 'internal', False) is True:
-        from open_webui.utils.subagents import MUTATING_MEMORY_TOOLS
-
-        builtin_functions = [func for func in builtin_functions if func.__name__ not in MUTATING_MEMORY_TOOLS]
+        # Internal calls never mutate memory (delegation children, timers).
+        # Inlined: the Python loop's MUTATING_MEMORY_TOOLS constant died with
+        # the pi deletion (PR14); the sidecar bridge carries the same names in
+        # loopback_mcp._strip_child_tools. Census: this strip is still live for
+        # delegation children whose model is not agent-routed (delegate_task
+        # is a builtin for any model, the child turn runs the plain loop).
+        builtin_functions = [
+            func
+            for func in builtin_functions
+            if func.__name__ not in {'add_memory', 'delete_memory', 'replace_memory_content', 'update_memory'}
+        ]
 
     for func in builtin_functions:
         callable = await get_async_tool_function_and_apply_extra_params(
@@ -1110,7 +1118,6 @@ def clean_properties(schema: dict):
 
 
 def clean_openai_tool_schema(spec: dict) -> dict:
-
     cleaned_spec = copy.deepcopy(spec)
 
     if 'parameters' in cleaned_spec:
