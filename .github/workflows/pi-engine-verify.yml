@@ -370,6 +370,12 @@ jobs:
                       kinds[key] = kinds.get(key, 0) + 1
                   print(f"[probe abst] {leg.name} turn {turn_index}: frames total={len(leg.socket.events)} "
                         f"kinds={kinds}", flush=True)
+                  # the frame payloads verbatim: the histogram above says the
+                  # frames exist; this says what their inner shape is
+                  for entry in leg.socket.events:
+                      data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+                      if entry.get("type") in ("response:completion", "chat:completion"):
+                          print(f"[probe abst] frame payload: {json.dumps(data)[:300]}", flush=True)
                   print(f"[probe abst] {leg.name} turn {turn_index}: provider receipts="
                         f"{_TimedList.receipts}", flush=True)
                   with leg.admin.client() as client:
