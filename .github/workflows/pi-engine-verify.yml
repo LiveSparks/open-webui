@@ -163,10 +163,18 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p /tmp/scratch/data /tmp/scratch/static "$RUNNER_TEMP/owui-logs"
-          pytest_cmd=(integration e2e/chat e2e/admin
-            --test-group-count 4 --test-group '${{ matrix.group }}'
-            -n 2 --dist loadfile -x --junitxml="$RUNNER_TEMP/parity-report.xml")
-          "$KIT/.venv/bin/python" -m pytest "${pytest_cmd[@]}" 2>&1 | tee "$RUNNER_TEMP/parity-console.log"
+          # shards are explicit real directory groups: runnable everywhere, no
+          # durations file, no plugin state; batch mode (no -x) so the fix pass
+          # reads one class list per lane instead of N round trips
+          case '${{ matrix.group }}' in
+            1) GROUP='integration/chat integration/auth integration/config integration/apps integration/audio integration/channels integration/imports integration/footprint integration/images integration/memory integration/notes integration/tasks' ;;
+            2) GROUP='integration/security integration/models integration/retrieval integration/deps integration/resolver integration/migrations integration/tools' ;;
+            3) GROUP='e2e/chat e2e/admin' ;;
+            4) GROUP='e2e/models e2e/workspace e2e/tools e2e/auth e2e/config e2e/audio e2e/channels e2e/security e2e/retrieval e2e/knowledge e2e/frontend e2e/imports e2e/images' ;;
+          esac
+          "$KIT/.venv/bin/python" -m pytest ${GROUP} -q \
+              -n 2 --dist loadfile --junitxml="$RUNNER_TEMP/parity-report.xml" 2>&1 \
+              | tee "$RUNNER_TEMP/parity-console.log"
 
       - name: Upload the parity artifact
         if: always()
@@ -284,6 +292,11 @@ jobs:
         with:
           version: '0.13.5'
           python-version: '3.12'
+      - name: Harness interpreter (uv sync --locked) + checkout requirements
+        working-directory: ${{ env.KIT }}
+        run: |
+          uv sync --locked
+          uv pip install --python "$KIT/.venv/bin/python" -r "$GITHUB_WORKSPACE/backend/requirements.txt"
       - name: Cache the playwright browsers
         uses: actions/cache@v6
         with:
