@@ -35,13 +35,6 @@ When done, end with a clear summary:
 - Any issues or open questions
 """
 
-MUTATING_MEMORY_TOOLS = {
-    'add_memory',
-    'delete_memory',
-    'replace_memory_content',
-    'update_memory',
-}
-
 log = logging.getLogger(__name__)
 
 
