@@ -26,6 +26,15 @@ name: pi engine verify
 
 on:
   workflow_dispatch:
+    inputs:
+      check_ref:
+        description: 'git ref to verify (default: the dispatch branch); a PR head sha works'
+        required: false
+        default: ''
+      kit_ref:
+        description: 'parity kit branch to clone (default: the fleet lane kit line)'
+        required: false
+        default: agent-self-learning-parity
   pull_request:
     branches: [dev]
     types: [opened, synchronize, reopened]
@@ -57,14 +66,14 @@ jobs:
       # equivalent on these ephemeral runners
       KIT: /tmp/kit
       # the parity kit is public and branch-named; no token, no extra vars
-      KIT_REF: agent-self-learning-parity
+      KIT_REF: ${{ inputs.kit_ref || 'agent-self-learning-parity' }}
       KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
-      OFFLOAD_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
 
       # the e2e slice drives a server on the built frontend
       - uses: actions/setup-node@v5
@@ -167,14 +176,14 @@ jobs:
       # equivalent on these ephemeral runners
       KIT: /tmp/kit
       # the parity kit is public and branch-named; no token, no extra vars
-      KIT_REF: agent-self-learning-parity
+      KIT_REF: ${{ inputs.kit_ref || 'agent-self-learning-parity' }}
       KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
-      OFFLOAD_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
 
       - name: Prepare the clean trunk checkout (origin/dev) beside the head
         run: |
@@ -470,12 +479,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      OFFLOAD_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-python@v6
         with:
@@ -559,12 +568,12 @@ jobs:
     timeout-minutes: 90
     continue-on-error: true
     env:
-      OFFLOAD_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-python@v6
         with:
