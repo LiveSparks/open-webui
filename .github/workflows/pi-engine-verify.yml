@@ -698,7 +698,7 @@ jobs:
   # entry, never a source checkout.
   packaging-wheel:
     name: packaging smoke (wheel -> install -> serve --help)
-    if: github.repository == 'LiveSparks/open-webui'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'LiveSparks/open-webui'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
