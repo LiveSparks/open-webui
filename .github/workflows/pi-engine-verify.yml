@@ -58,7 +58,6 @@ permissions:
   contents: read
 
 jobs:
-jobs:
   # — (a) full parity lane, sharded across runners ————————————
   # The exact command from the plan's unit verify box, split across four
   # runners with the kit's own pytest-split groups (pytest-split>=0.11 is in
