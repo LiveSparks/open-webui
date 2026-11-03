@@ -80,7 +80,7 @@ jobs:
           - group: 4
             label: remaining-modules
     runs-on: ubuntu-latest
-    if: github.repository == 'LiveSparks/open-webui'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'LiveSparks/open-webui'
     # the suite is a multi-hour lane on 4-vCPU hosted runners; a shard of a
     # quarter plus two in-run workers fits well inside this budget
     timeout-minutes: 150
@@ -251,7 +251,7 @@ jobs:
   # groups ride along visibly instead of being silently skipped
   e2e-wide:
     name: wide e2e ${{ matrix.group }} (non-blocking)
-    if: github.repository == 'LiveSparks/open-webui'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'LiveSparks/open-webui'
     strategy:
       fail-fast: false
       matrix:
@@ -338,7 +338,7 @@ jobs:
           if-no-files-found: warn
   perf-two-leg:
     name: perf probe (interleaved 50 turns, head vs clean origin/dev)
-    if: github.repository == 'LiveSparks/open-webui'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'LiveSparks/open-webui'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
