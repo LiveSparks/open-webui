@@ -290,7 +290,8 @@ jobs:
           uv sync --locked
           uv pip install --python "$KIT/.venv/bin/python" -r "$GITHUB_WORKSPACE/backend/requirements.txt"
       - name: Bundled Chromium
-        run: "$KIT/.venv/bin/python" -m playwright install --with-deps chromium
+        run: |
+          "$KIT/.venv/bin/python" -m playwright install --with-deps chromium
 
       - name: Smoke the chat API + one journey file
         working-directory: ${{ env.KIT }}
