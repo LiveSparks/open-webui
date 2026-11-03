@@ -39,23 +39,11 @@ on:
         description: 'also run the wide e2e evidence groups (release-gate arms; the per-verification shape leaves them out)'
         required: false
         default: 'false'
-  pull_request:
-    branches: [dev]
-    types: [opened, synchronize, reopened]
-    # code-only changes verify themselves here; docs and support-file PRs run
-    # the workflow_dispatch path explicitly instead of burning the multi-hour
-    # parity suite
-    paths:
-      - 'backend/**'
-      - 'sidecar/**'
-      - 'src/**'
-      - 'backend/requirements.txt'
-      - '.github/workflows/pi-engine-verify.yml'
 
-# Group per head sha so pushes cannot stampede the runners; a new sha gets a
-# fresh group and runs, an already-recorded head keeps its own verdict.
+# Dispatch-only by operator ruling: nothing arms this matrix from a push or a
+# pull_request. A head needing verification gets its own deliberate dispatch.
 concurrency:
-  group: pi-engine-verify-${{ github.event.pull_request.head.sha || github.sha }}
+  group: pi-engine-verify-${{ inputs.check_ref || github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -95,12 +83,12 @@ jobs:
       # the parity kit is public and branch-named; no token, no extra vars
       KIT_REF: ${{ inputs.kit_ref || 'agent-self-learning-parity' }}
       KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
-      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.sha }}
 
       # the e2e slice drives a server on the built frontend; the build is
       # cached on its inputs so three of four shards skip the recomppile
@@ -206,12 +194,12 @@ jobs:
       KIT: /tmp/kit
       KIT_REF: ${{ inputs.kit_ref || 'agent-self-learning-parity' }}
       KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
-      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.sha }}
 
       - name: Clone the parity kit branch
         run: git clone --depth 1 --branch "$KIT_REF" "$KIT_URL" "$KIT"
@@ -250,81 +238,6 @@ jobs:
             ${{ runner.temp }}/unit-console.log
           if-no-files-found: warn
 
-  # the PR smoke: the mapped module's API surface and one real browser
-  # journey file, a couple of minutes on a runner. Nothing here is a gate for
-  # the merge judgment (the heavy lanes carry that on dispatch); the smoke
-  # tells a code PR whether the tree still boots the browser chat path early.
-  smoke-lane:
-    name: PR smoke (chat API + one journey file)
-    if: github.event_name == 'pull_request' && github.repository == 'LiveSparks/open-webui'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      KIT: /tmp/kit
-      KIT_REF: agent-self-learning-parity
-      KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
-      OFFLOAD_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-    steps:
-      - name: Check out the PR head
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: npm
-      - name: Build the frontend
-        env:
-          NODE_OPTIONS: --max-old-space-size=5120
-        run: |
-          npm ci --force || true
-          npm run build
-
-      - name: Clone the parity kit branch
-        run: git clone --depth 1 --branch "$KIT_REF" "$KIT_URL" "$KIT"
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: '0.13.5'
-          python-version: '3.12'
-      - name: Harness interpreter (uv sync --locked) + checkout requirements
-        working-directory: ${{ env.KIT }}
-        run: |
-          uv sync --locked
-          uv pip install --python "$KIT/.venv/bin/python" -r "$GITHUB_WORKSPACE/backend/requirements.txt"
-      - name: Bundled Chromium
-        run: |
-          "$KIT/.venv/bin/python" -m playwright install --with-deps chromium
-
-      - name: Smoke the chat API + one journey file
-        working-directory: ${{ env.KIT }}
-        env:
-          OPEN_WEBUI_CHECKOUT: ${{ github.workspace }}
-          OPEN_WEBUI_SOURCE_DIR: ${{ github.workspace }}/backend
-          WEBUI_SECRET_KEY: test
-          DATA_DIR: /tmp/scratch/data
-          STATIC_DIR: /tmp/scratch/static
-          OPEN_WEBUI_LOG_DIR: ${{ runner.temp }}/owui-logs
-          LANG: en_US.UTF-8
-          LC_ALL: en_US.UTF-8
-          TZ: 'UTC'
-        run: |
-          set -o pipefail
-          mkdir -p /tmp/scratch/data /tmp/scratch/static "$RUNNER_TEMP/owui-logs"
-          "$KIT/.venv/bin/python" -m pytest integration/test_chat_completions.py e2e/test_chat_journeys.py -q \
-              --junitxml="$RUNNER_TEMP/smoke-report.xml" 2>&1 | tee "$RUNNER_TEMP/smoke-console.log"
-
-      - name: Upload the smoke artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pi-engine-smoke-${{ env.OFFLOAD_HEAD_SHA }}
-          path: |
-            ${{ runner.temp }}/smoke-report.xml
-            ${{ runner.temp }}/smoke-console.log
-          if-no-files-found: warn
-
   # the wide e2e groups are evidence, not a gate: the plan's e2e box is the
   # mapped chat surface (e2e/chat + e2e/admin inside the shards); these
   # groups ride along visibly instead of being silently skipped
@@ -342,12 +255,12 @@ jobs:
       KIT: /tmp/kit
       KIT_REF: ${{ inputs.kit_ref || 'agent-self-learning-parity' }}
       KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
-      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.sha }}
 
       - uses: actions/setup-node@v5
         with:
@@ -427,12 +340,12 @@ jobs:
       # the parity kit is public and branch-named; no token, no extra vars
       KIT_REF: ${{ inputs.kit_ref || 'agent-self-learning-parity' }}
       KIT_URL: https://github.com/LiveSparks/open-webui-tests.git
-      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.sha }}
 
       - name: Prepare the clean trunk checkout (origin/dev) beside the head
         run: |
@@ -781,12 +694,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+      OFFLOAD_HEAD_SHA: ${{ inputs.check_ref || github.sha }}
     steps:
       - name: Check out the head under test
         uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.check_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.check_ref || github.sha }}
 
       - uses: actions/setup-python@v6
         with:
