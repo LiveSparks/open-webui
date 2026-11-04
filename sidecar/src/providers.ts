@@ -353,6 +353,8 @@ export interface CatalogModel {
 	name: string;
 	reasoning: boolean;
 	thinkingLevels: string[];
+	/** A model-pinned gateway URL, when the provider serves several. */
+	baseUrl?: string;
 }
 
 export interface CatalogProvider {
@@ -362,7 +364,7 @@ export interface CatalogProvider {
 	models: CatalogModel[];
 }
 
-/** The catalog snapshot the backend consumes (issue 20): providers, models, and each model's supported thinking ladder out of pi's bundled catalogs. No credentials, no keys. */
+/** The catalog snapshot the backend consumes (issue 20): providers, models, each model's supported thinking ladder, and the URL a connection must point at for the wrapper to match. No credentials, no keys. */
 export function buildProviderCatalog(runtime: ModelRuntime): { providers: CatalogProvider[] } {
 	return {
 		providers: runtime.getProviders().map((provider) => ({
@@ -377,6 +379,10 @@ export function buildProviderCatalog(runtime: ModelRuntime): { providers: Catalo
 					name: model.name ?? model.id,
 					reasoning: model.reasoning,
 					thinkingLevels: getSupportedThinkingLevels(model),
+					// A model-pinned gateway URL: the built-in providers own
+					// several (one API shape each), and the backend matches
+					// connections against the model's own URL.
+					...(model.baseUrl ? { baseUrl: model.baseUrl } : {}),
 				})),
 		})),
 	};

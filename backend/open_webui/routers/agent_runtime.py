@@ -93,10 +93,21 @@ def _norm_base_url(url: str) -> str:
 
 
 def _find_builtin_provider(providers: list[dict], url: str, model_id: str) -> dict | None:
+    """A pi-catalog provider the connection URL resolves to, one way or the other.
+
+    The provider catalog carries the connection URL either on the provider
+    itself or on the model entry (pi-ai pins OpenCode Go at the model level,
+    a provider with several gateway URLs), which is the same truth the
+    runtime uses to resolve the turn.
+    """
     for provider in providers:
-        if _norm_base_url(provider.get('baseUrl') or '') != _norm_base_url(url):
+        models = provider.get('models') or []
+        model_match = any(model.get('id') == model_id for model in models)
+        if not model_match:
             continue
-        if any(model.get('id') == model_id for model in provider.get('models') or []):
+        if (_norm_base_url(provider.get('baseUrl') or '') == _norm_base_url(url)) or any(
+            _norm_base_url(model.get('baseUrl') or '') == _norm_base_url(url) for model in models
+        ):
             return provider
     return None
 

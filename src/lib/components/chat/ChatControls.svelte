@@ -307,7 +307,7 @@
 							{:else if activeTab === 'files' && codeInterpreterEnabled}
 								<PyodideFileNav />
 							{:else}
-								<Controls embed={true} {models} bind:chatFiles bind:params />
+								<Controls embed={true} {models} {modelId} bind:chatFiles bind:params />
 							{/if}
 						</div>
 					</div>
@@ -437,7 +437,7 @@
 							{:else if activeTab === 'files' && codeInterpreterEnabled}
 								<PyodideFileNav overlay={dragged} />
 							{:else}
-								<Controls embed={true} {models} bind:chatFiles bind:params />
+								<Controls embed={true} {models} {modelId} bind:chatFiles bind:params />
 							{/if}
 						</div>
 					</div>

@@ -150,6 +150,7 @@ from open_webui.models.models import Models, normalize_model_tags
 from open_webui.models.groups import Groups, resolve_group_default_models
 from open_webui.models.users import Users
 from open_webui.loopback_mcp import router as loopback_mcp_router
+from open_webui.routers.agent import router as agent_router
 from open_webui.routers.agent_lessons import router as agent_lessons_router
 from open_webui.routers.agent_machines import router as agent_machines_router
 from open_webui.routers.agent_runtime import router as agent_runtime_router
@@ -926,6 +927,10 @@ app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
 # Agentic workspace artifacts (PR12): tombstones, restore, and edit history
 # for the four agent-writable families (tool, prompt, skill, knowledge).
 app.include_router(agent_workspace_router, prefix='/api/v1/agent_workspace', tags=['agent_workspace'])
+
+# Composer-facing agent model facts (issue 20): the thinking ladder a model
+# clamps against, resolved fresh from the sidecar's catalog.
+app.include_router(agent_router, prefix='/api/v1/agent', tags=['agent'])
 
 
 app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])

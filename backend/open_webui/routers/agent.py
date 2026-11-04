@@ -38,12 +38,13 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from open_webui.models.chats import Chats
 from open_webui.loopback_mcp import mint_session_binding
 from open_webui.routers.agent_machines import mint_machine_binding
 from open_webui.utils.agent_loop import agent_loop_model_ids
+from open_webui.utils.auth import get_verified_user
 from open_webui.utils.chat_id import is_saved_chat_id
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,53 @@ router = APIRouter()
 
 STREAM_STALL_TIMEOUT_S = int(os.environ.get('AGENT_SIDECAR_STREAM_TIMEOUT', '0') or 0) or None
 REQUEST_TIMEOUT_S = float(os.environ.get('AGENT_SIDECAR_REQUEST_TIMEOUT', '30') or 30)
+
+# The static ladder until a model's own catalog entry answers (issue 20).
+DEFAULT_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+
+@router.get('/thinking-levels')
+async def resolve_thinking_levels(
+    request: Request,
+    user=Depends(get_verified_user),
+    model_id: str = '',
+):
+    """The thinking ladder one composer model should offer, resolved fresh per call.
+
+    The composer dropdown shows a list the model can actually clamp against:
+    for a pi-catalog match this is the sidecar's catalog ladder (shared with
+    the per-turn handoff), for everything else the paper ladder the handoff
+    itself accepts. Connection settings stay server-side; the endpoint
+    answers a string list and nothing else (issue 20, PR10 named gap).
+    """
+    from open_webui.routers.agent_runtime import _find_builtin_provider, _resolve_turn_connection, get_sidecar_catalog
+    from open_webui.utils.model_ids import strip_provider_model_prefix
+
+    if not model_id:
+        return {'modelId': model_id, 'engine': 'none', 'levels': list(DEFAULT_THINKING_LEVELS)}
+
+    levels = list(DEFAULT_THINKING_LEVELS)
+    engine = 'native'
+    try:
+        _url, _key, api_config, base_model_id = await _resolve_turn_connection(request, user, model_id)
+        upstream_model_id = strip_provider_model_prefix(base_model_id, api_config.get('prefix_id'))
+        providers = await get_sidecar_catalog(request)
+        builtin = _find_builtin_provider(providers, _url, upstream_model_id)
+        if builtin is not None:
+            for model in builtin.get('models') or []:
+                if model.get('id') == upstream_model_id:
+                    catalog_levels = model.get('thinkingLevels') or []
+                    if catalog_levels:
+                        levels = list(catalog_levels)
+                        engine = 'pi'
+                    break
+        else:
+            engine = 'synth'
+    except Exception as e:
+        log.debug('agent handoff: thinking-levels fell back to the default ladder: %s', e)
+        engine = 'native'
+
+    return {'modelId': model_id, 'engine': engine, 'levels': levels}
 
 
 def sidecar_base_url() -> str:
