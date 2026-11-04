@@ -10,10 +10,24 @@
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
 
 	import { user, settings } from '$lib/stores';
+	import { getThinkingLevels, DEFAULT_THINKING_LEVELS } from '$lib/apis/agents';
+
 	export let models = [];
 	export let chatFiles = [];
 	export let params = {};
 	export let embed = false;
+	export let modelId: string | null = null;
+
+	// The current model's resolved thinking ladder (issue 20): the dropdown
+	// offers what the handoff clamps against instead of the paper ladder.
+	let effortLevels: string[] = [...DEFAULT_THINKING_LEVELS];
+	let ladderModelId: string | null = null;
+	$: if (modelId && modelId !== ladderModelId) {
+		ladderModelId = modelId;
+		(getThinkingLevels(localStorage.getItem('token') ?? '', modelId) as Promise<string[]>).then((levels) => {
+			if (ladderModelId === modelId) effortLevels = levels;
+		});
+	}
 
 	// Persist collapsible section open/close state
 	const getOpen = (key: string, fallback = true): boolean => {
@@ -139,7 +153,7 @@
 				>
 					<div class="pt-1 pb-1 text-xs" slot="content">
 						<div>
-							<AdvancedParams admin={$user?.role === 'admin'} custom={true} bind:params />
+							<AdvancedParams admin={$user?.role === 'admin'} custom={true} bind:params {effortLevels} />
 						</div>
 					</div>
 				</Collapsible>

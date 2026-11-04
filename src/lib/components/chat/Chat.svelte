@@ -5578,6 +5578,7 @@
 										{taskIds}
 										bind:selectedModels
 										bind:files
+										bind:params
 										bind:prompt
 										bind:autoScroll
 										bind:selectedToolIds
@@ -5691,6 +5692,7 @@
 										{taskIds}
 										bind:selectedModels
 										bind:files
+										bind:params
 										bind:prompt
 										bind:autoScroll
 										bind:selectedToolIds
