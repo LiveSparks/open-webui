@@ -1,0 +1,109 @@
+name: deploy-wheel
+
+# The operator's box never builds release artifacts (standing order 20):
+# dispatch builds the wheel on Actions and publishes it as a release asset,
+# keeping the asset name constant so releases/latest/download/... keeps
+# resolving. Tag preferring the ADR 0008 convention: v0.12.3-pi.N.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (created if missing, asset attached if present)'
+        required: true
+        default: 'v0.12.3-pi.3'
+      check_ref:
+        description: 'Full commit sha or branch to build from (default: dev tip)'
+        required: false
+        default: ''
+      title:
+        description: 'Release title'
+        required: false
+        default: 'Open WebUI 0.12.3 + pi agent engine'
+      notes:
+        description: 'Release notes body (markdown)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: deploy-wheel-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  wheel:
+    name: build wheel + publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag }}
+      HEAD_SHA: ${{ inputs.check_ref || github.sha }}
+      ASSET_NAME: open_webui-0.12.3-py3-none-any.whl
+    steps:
+      - name: Check out the head under test
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.check_ref || github.sha }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Build the wheel
+        run: |
+          set -o pipefail
+          python -m pip install --quiet build
+          python -m build --wheel --outdir dist 2>&1 | tee "$RUNNER_TEMP/build-wheel.log"
+
+      - name: Assert the wheel ships the agent sidecar
+        run: |
+          WHEEL=$(ls "$GITHUB_WORKSPACE"/dist/*.whl)
+          python - "$WHEEL" <<'WHEEL_CHECK'
+          import sys
+          import zipfile
+
+          wheel = sys.argv[1]
+          names = zipfile.ZipFile(wheel).namelist()
+          required = [
+              'open_webui/sidecar/dist/index.js',
+              'open_webui/sidecar/package.json',
+              'open_webui/utils/sidecar_launch.py',
+          ]
+          node_modules = [n for n in names if n.startswith('open_webui/sidecar/node_modules/')]
+          problems = [n for n in required if n not in names]
+          if len(node_modules) < 10:
+              problems.append(f'sidecar node_modules looks wrong: {len(node_modules)} entries')
+          if problems:
+              raise SystemExit(f'WHEEL CONTENT MISSING: {problems}')
+          print(f'wheel content check passed ({len(node_modules)} node_modules entries)')
+          WHEEL_CHECK
+
+      - name: Stamp the head sha and checksum into the notes
+        run: |
+          sha256sum "$GITHUB_WORKSPACE"/dist/*.whl | tee /tmp/wheel.sha256
+          checksum=$(cut -d' ' -f1 /tmp/wheel.sha256)
+          printf '%s\n' "" "" "Built by deploy-wheel from commit \`$HEAD_SHA\`." "Asset: $ASSET_NAME" "sha256: \`$checksum\`." >> /tmp/body.md
+          printf '%s' "${{ inputs.notes }}" > /tmp/head.md
+          cat /tmp/head.md /tmp/body.md > /tmp/full-body.md
+
+      - name: Publish the release (create or attach)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "$GITHUB_WORKSPACE"/dist/*.whl)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release $TAG exists - attaching the asset"
+            gh release upload "$TAG" "$WHEEL#$ASSET_NAME" --clobber
+          else
+            echo "creating release $TAG at $HEAD_SHA"
+            gh release create "$TAG" --target "$HEAD_SHA" --title "${{ inputs.title }} ($TAG)" --notes-file /tmp/full-body.md "$WHEEL#$ASSET_NAME"
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[] | {name, size}'
