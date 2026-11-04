@@ -17,6 +17,11 @@ msg_info "Installing dependencies"
 $STD apt install -y ca-certificates curl
 msg_ok "Installed dependencies"
 
+msg_info "Installing Node 22 (the packaged sidecar runtime)"
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
+$STD apt install -y nodejs
+msg_ok "Installed Node $(node --version)"
+
 PYTHON_VERSION="3.11" setup_uv
 
 PI_WHEEL_URL="${PI_WHEEL_URL:-https://github.com/LiveSparks/open-webui/releases/latest/download/open_webui-0.12.3-py3-none-any.whl}"
@@ -33,15 +38,27 @@ done
 msg_ok "Installed Open WebUI wheel"
 
 msg_info "Creating data and backup directories"
-mkdir -p /var/lib/open-webui /var/backups/open-webui
+mkdir -p /var/lib/open-webui /var/backups/open-webui /var/lib/open-webui/pi-agent /var/lib/open-webui/pi_sessions
 msg_ok "Created data and backup directories"
 
 msg_info "Writing /etc/openwebui-pi.env"
 cat <<EOF >/etc/openwebui-pi.env
 PI_WHEEL_URL=${PI_WHEEL_URL}
 OWUI_PORT=${OWUI_PORT}
+# The agent engine: the wheel's launcher gates on these (sidecar_launch.py).
+AGENT_SIDECAR_PORT=8930
+AGENT_SIDECAR_AGENT_DIR=/var/lib/open-webui/pi-agent
+AGENT_SIDECAR_MODEL=opencode-go/glm-5.3-flash
+AGENT_SESSIONS=/var/lib/open-webui/pi_sessions
+# Comma-separated model ids that route through the agent engine; the rest
+# keep OWUI's native loop. Extend as connections gain models.
+AGENT_LOOP_MODEL_IDS=glm-5.3-flash
 EOF
 msg_ok "Wrote /etc/openwebui-pi.env"
+
+msg_info "Creating agent engine directories"
+mkdir -p /var/lib/open-webui/pi-agent /var/lib/open-webui/pi_sessions
+msg_ok "Created agent engine directories"
 
 msg_info "Installing openwebui-pi-update command"
 cat <<'EOS' >/usr/bin/openwebui-pi-update

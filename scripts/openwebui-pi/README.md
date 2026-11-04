@@ -39,6 +39,22 @@ all live under `DATA_DIR=/var/lib/open-webui` and the update never touches
 that path. `/root/.webui_secret_key` (session keys) and
 `/etc/openwebui-pi.env` (configuration) also survive every update.
 
+## The agent engine
+
+The install writes the engine envs into `/etc/openwebui-pi.env`; Open WebUI
+starts the pi sidecar beside the server (`journalctl -u open-webui` shows
+`agent sidecar healthy`). Only the comma-separated `AGENT_LOOP_MODEL_IDS` list
+routes through the agent engine; every other model keeps OWUI's native loop.
+Append ids as your connections gain models:
+
+```bash
+AGENT_LOOP_MODEL_IDS=glm-5.3-flash,grok-4.7
+```
+
+Then `systemctl restart open-webui`. If a chat seems not to take the engine,
+check that the composer's model id (the `form_data['model']` value) appears
+in that list verbatim.
+
 ## Pin a wheel
 
 Updates install the `latest` release asset by default. To pin a version,
