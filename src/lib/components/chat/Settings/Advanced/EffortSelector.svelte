@@ -13,11 +13,13 @@
 	 * so the control is always usable.
 	 */
 	export let levels: string[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+	/** The seed the UI shows while the chat has no explicit choice (Chat resolves it). */
+	export let fallback: string | undefined = undefined;
 
 	/** Legacy stored values read onto the ladder: 'none' means 'off' upstream. */
 	const normalize = (value: string | null) => (value === 'none' ? 'off' : value);
 
-	$: selected = normalize(value) ?? 'medium';
+	$: selected = normalize(value) ?? (fallback ? (normalize(fallback) as string) : 'medium');
 	$: options = levels.length > 0 ? (selected && !levels.includes(selected) ? [...levels, selected] : levels) : ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 </script>
 

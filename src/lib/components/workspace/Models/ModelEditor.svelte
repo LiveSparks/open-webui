@@ -27,6 +27,7 @@
 	import { uploadFile, deleteFileById } from '$lib/apis/files';
 
 	import AdvancedParams from '$lib/components/chat/Settings/Advanced/AdvancedParams.svelte';
+	import { getThinkingLevels, DEFAULT_THINKING_LEVELS } from '$lib/apis/agents';
 	import ModelControls from '$lib/components/admin/Settings/Models/ModelControls.svelte';
 	import ModelSelector from '$lib/components/chat/ModelSelector/Selector.svelte';
 	import Tags from '$lib/components/common/Tags.svelte';
@@ -71,6 +72,17 @@
 	export let onBack: null | Function = null;
 
 	export let model: any = null;
+
+	// The edited model's own ladder (issue 20): the editor's effort dropdown offers
+	// what the handoff clamps against for exactly this model.
+	let effortLevels: string[] = [...DEFAULT_THINKING_LEVELS];
+	let ladderModelId: string | null = null;
+	$: if (model?.id && model.id !== ladderModelId) {
+		ladderModelId = model.id;
+		(getThinkingLevels(localStorage.getItem('token') ?? '', model.id) as Promise<string[]>).then((levels) => {
+			if (ladderModelId === model.id) effortLevels = levels;
+		});
+	}
 	export let edit = false;
 	export let admin = false;
 
@@ -1475,7 +1487,7 @@
 
 									{#if showAdvanced}
 										<fieldset disabled={readOnly} class="min-w-0 my-2 pl-3">
-											<AdvancedParams admin={true} custom={true} layout="grid" bind:params />
+											<AdvancedParams admin={true} custom={true} layout="grid" bind:params {effortLevels} />
 										</fieldset>
 									{/if}
 									<fieldset disabled={readOnly} class="min-w-0">

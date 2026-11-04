@@ -17,6 +17,8 @@ import EffortSelector from './EffortSelector.svelte';
 	export let layout: 'stack' | 'grid' = 'stack';
 	/** The current model's resolved thinking ladder (chat controls only). */
 	export let effortLevels: string[] | null = null;
+	/** The seed rendered while the chat has no explicit choice (Chat owns the resolution). */
+	export let effortFallback: string | null = null;
 
 	const defaultParams = {
 		// Advanced
@@ -508,7 +510,11 @@ import EffortSelector from './EffortSelector.svelte';
 		</Tooltip>
 
 		{#if (params?.reasoning_effort ?? null) !== null}
-			<EffortSelector bind:value={params.reasoning_effort} levels={effortLevels ?? undefined} />
+			<EffortSelector
+				bind:value={params.reasoning_effort}
+				levels={effortLevels ?? undefined}
+				fallback={effortFallback ?? undefined}
+			/>
 		{/if}
 	</div>
 

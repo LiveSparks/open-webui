@@ -97,6 +97,8 @@
 	} from '$lib/apis/chats';
 	import type { FilesystemFile } from '$lib/apis/terminal';
 	import { generateOpenAIChatCompletion, getErrorMessage } from '$lib/apis/openai';
+	import { getThinkingLevels } from '$lib/apis/agents';
+	import { effortSeed } from '$lib/stores/effort';
 	import { processUrl, processWebSearch } from '$lib/apis/retrieval';
 	import {
 		getAndUpdateUserLocation,
@@ -496,6 +498,35 @@
 	};
 
 	let params = {};
+	// Reasoning-effort seed (issue 20): a chat without an explicit choice reads
+	// as the first speaking source — the workspace model's own advanced param,
+	// the last level the user picked, or the highest level the model's ladder
+	// carries. The published store feeds the composer picker and the controls
+	// panel; the seed materializes into params at send. A stored
+	// `reasoning_effort: null` is an explicit Default and never re-seeds.
+	let effortSeedModel: string | null = null;
+
+	$: if (selectedModelIds?.length === 1 && selectedModelIds[0] !== effortSeedModel) {
+		effortSeedModel = selectedModelIds[0];
+		effortSeed.set(null);
+		const model = $models.find((m) => m.id === selectedModelIds?.[0]);
+		const fromModel = (model?.info?.params as Record<string, any> | undefined)?.reasoning_effort;
+		const last = localStorage.getItem('lastEffort');
+		if (selectedModelIds?.[0]) {
+			getThinkingLevels(localStorage.getItem('token') ?? '', selectedModelIds[0]).then((levels) => {
+				if (effortSeedModel === selectedModelIds?.[0]) {
+					effortSeed.set(
+						fromModel ?? (last ?? (levels.length > 0 ? levels[levels.length - 1] : null)) ?? null
+					);
+				}
+			});
+		}
+	}
+
+	const materializeEffort = () => {
+		if (params?.reasoning_effort !== undefined || get(effortSeed) === null) return;
+		(params as Record<string, any>).reasoning_effort = get(effortSeed) as string;
+	};
 	let chatVariables = {};
 	let showChatVariablesModal = false;
 	let loadedChatIdProp = '';
@@ -4120,6 +4151,7 @@
 
 		// Clear input and submit
 		messageInput?.setText('');
+		materializeEffort();
 		prompt = '';
 		const _files = structuredClone(files);
 		files = [];
@@ -5579,7 +5611,7 @@
 										bind:selectedModels
 										bind:files
 										bind:params
-										bind:prompt
+													bind:prompt
 										bind:autoScroll
 										bind:selectedToolIds
 										bind:selectedSkillIds
@@ -5693,7 +5725,7 @@
 										bind:selectedModels
 										bind:files
 										bind:params
-										bind:prompt
+													bind:prompt
 										bind:autoScroll
 										bind:selectedToolIds
 										bind:selectedSkillIds

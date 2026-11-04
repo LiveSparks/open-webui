@@ -11,6 +11,7 @@
 
 	import { user, settings } from '$lib/stores';
 	import { getThinkingLevels, DEFAULT_THINKING_LEVELS } from '$lib/apis/agents';
+	import { effortSeed } from '$lib/stores/effort';
 
 	export let models = [];
 	export let chatFiles = [];
@@ -22,6 +23,8 @@
 	// offers what the handoff clamps against instead of the paper ladder.
 	let effortLevels: string[] = [...DEFAULT_THINKING_LEVELS];
 	let ladderModelId: string | null = null;
+	/** What the UI shows while the chat carries no choice: the seed, or pi's own default. */
+	$: effectiveFallback = $effortSeed ?? 'medium';
 	$: if (modelId && modelId !== ladderModelId) {
 		ladderModelId = modelId;
 		(getThinkingLevels(localStorage.getItem('token') ?? '', modelId) as Promise<string[]>).then((levels) => {
@@ -153,7 +156,7 @@
 				>
 					<div class="pt-1 pb-1 text-xs" slot="content">
 						<div>
-							<AdvancedParams admin={$user?.role === 'admin'} custom={true} bind:params {effortLevels} />
+							<AdvancedParams admin={$user?.role === 'admin'} custom={true} bind:params {effortLevels} {effectiveFallback} />
 						</div>
 					</div>
 				</Collapsible>
