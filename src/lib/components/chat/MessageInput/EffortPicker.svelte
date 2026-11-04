@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { getContext } from 'svelte';
 	import type { Readable } from 'svelte/store';
+	import { effortSeed } from '$lib/stores/effort';
 
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
@@ -35,9 +36,13 @@
 
 	$: selected = normalize((params?.reasoning_effort ?? null) as string | null);
 	$: unset = (params?.reasoning_effort ?? null) === null;
+	$: display = unset ? ($effortSeed ?? 'Default') : label(selected);
 
 	const pick = (level: string) => {
 		params.reasoning_effort = level;
+		// The last explicit level rides to the next chat (the seeding in Chat reads
+		// it when the chat and the workspace model both leave the field unset).
+		localStorage.setItem('lastEffort', level);
 		open = false;
 	};
 
@@ -69,7 +74,13 @@
 			on:click|stopPropagation={() => (open = !open)}
 		>
 			<span class="hidden sm:inline">{$i18n.t('Effort')}</span>
-			<span class="font-medium">{unset ? $i18n.t('Default') : $i18n.t(label(selected))}</span>
+			<span class="font-medium">
+				{typeof display === 'string'
+					? display === 'Default'
+						? $i18n.t('Default')
+						: $i18n.t(display.charAt(0).toUpperCase() + display.slice(1))
+					: display}
+			</span>
 			<ChevronDown className="size-3.5 text-gray-400 dark:text-gray-500" />
 		</button>
 	</Tooltip>
@@ -82,11 +93,11 @@
 			<button
 				type="button"
 				class="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-xs hover:bg-gray-50/60 dark:hover:bg-gray-800/60"
-				class:font-medium={unset}
+				class:font-medium={params?.reasoning_effort === null}
 				on:click|stopPropagation={unpick}
 			>
 				{$i18n.t('Default')}
-				{#if unset}<span class="text-[0.625rem] text-blue-500">●</span>{/if}
+				{#if params?.reasoning_effort === null}<span class="text-[0.625rem] text-blue-500">●</span>{/if}
 			</button>
 			{#each levels as level (level)}
 				<button

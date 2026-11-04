@@ -217,6 +217,29 @@ export function ensureTurnModel(runtime: ModelRuntime, envelope: TurnEnvelope): 
 }
 
 /**
+ * Built-in providers whose runtime marker key has been set this process. The
+ * per-turn key route delivers the real key at stream time (agent-loop's
+ * request options win over credentials), but pi's own prompt preflight
+ * consults the runtime's credential state first, so a built-in provider must
+ * read as configured or the run dies before the loop starts. The marker
+ * string itself is inert: nothing but the OWUI key route ever passes pi a
+ * key for a bridged turn, and the real key crosses at the moment of use.
+ */
+const bridgedBuiltinProviders = new Set<string>();
+
+export async function markBridgedAuth(runtime: ModelRuntime, providerId: string): Promise<void> {
+	if (bridgedBuiltinProviders.has(providerId)) return;
+	try {
+		await runtime.setRuntimeApiKey(providerId, OWUI_MANAGED_API_KEY);
+		bridgedBuiltinProviders.add(providerId);
+	} catch (error) {
+		console.error(
+			`agent handoff: marker auth for ${providerId} failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+/**
  * Apply the turn's envelope between runs: the resolved model becomes the
  * session's model (a mid-turn switch is simply the next turn), the chosen
  * effort lands as the session's thinking level (pi clamps to the model's
@@ -224,6 +247,7 @@ export function ensureTurnModel(runtime: ModelRuntime, envelope: TurnEnvelope): 
  */
 export async function applyTurnEnvelope(session: AgentSession, runtime: ModelRuntime, envelope: TurnEnvelope): Promise<void> {
 	const model = ensureTurnModel(runtime, envelope);
+	if (!envelope.provider) await markBridgedAuth(runtime, envelope.model.provider);
 	// Not setModel(): it refuses a provider without a stored credential, and by
 	// design the sidecar never holds one. The per-request key override is the
 	// only credential route (issue 22).

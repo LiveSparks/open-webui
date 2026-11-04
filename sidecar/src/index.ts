@@ -2,6 +2,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./config.ts";
 import { createHttpSurface } from "./http.ts";
 import { resolveModel, SessionRegistry } from "./session.ts";
+import { markBridgedAuth as markProviderAuth } from "./providers.ts";
 
 async function main(): Promise<void> {
 	const config = loadConfig();
@@ -10,6 +11,10 @@ async function main(): Promise<void> {
 		modelsPath: `${config.agentDir}/models.json`,
 	});
 	const model = resolveModel(config, modelRuntime);
+	// The default provider reads as configured from boot, so the first turn on
+	// a fresh process never races the credential-state refresh (per-turn turns
+	// mark their own provider in the envelope below).
+	await markProviderAuth(modelRuntime, config.modelId.provider);
 	const registry = new SessionRegistry(config, modelRuntime, model);
 	const surface = createHttpSurface({ config, registry, modelRuntime });
 
