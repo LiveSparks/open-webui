@@ -50,6 +50,9 @@ AGENT_SIDECAR_PORT=8930
 AGENT_SIDECAR_AGENT_DIR=/var/lib/open-webui/pi-agent
 AGENT_SIDECAR_MODEL=opencode-go/glm-5.3-flash
 AGENT_SESSIONS=/var/lib/open-webui/pi_sessions
+# The tool-bridge binding must be loopback (the sidecar refuses any other
+# host); an external access address must not become the minted URL.
+AGENT_LOOPBACK_URL=http://127.0.0.1:${OWUI_PORT}/loopback/mcp
 # Comma-separated model ids that route through the agent engine; the rest
 # keep OWUI's native loop. Extend as connections gain models.
 AGENT_LOOP_MODEL_IDS=glm-5.3-flash

@@ -51,9 +51,12 @@ Append ids as your connections gain models:
 AGENT_LOOP_MODEL_IDS=glm-5.3-flash,grok-4.7
 ```
 
-Then `systemctl restart open-webui`. If a chat seems not to take the engine,
-check that the composer's model id (the `form_data['model']` value) appears
-in that list verbatim.
+Then `systemctl restart open-webui`. If a chat seems not to take the
+engine, check that the composer's model id (the `form_data['model']`
+value) appears in that list verbatim. If a chat fails with
+`agent sidecar unreachable ... /sessions`, the tool-bridge binding minted
+from the browser's address was not loopback; `AGENT_LOOPBACK_URL` in the
+env file pins it (the install already sets it).
 
 ## Pin a wheel
 
