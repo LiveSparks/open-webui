@@ -3352,15 +3352,19 @@
 			})
 		});
 		if (!res.ok) {
+			// Refusal reads on status alone; the body may be JSON or SSE text.
+			const body = (await res.text()).slice(0, 400);
 			let detail = '';
 			try {
-				const body = await res.json();
-				detail = body?.detail ?? '';
+				detail = JSON.parse(body)?.detail ?? '';
 			} catch {
-				/* status line only */
+				detail = body;
 			}
 			throw new Error(detail || `The steer was refused (${res.status}).`);
 		}
+		// The steer POST returns the delivery ack (SSE or json); the steer is
+		// accepted on status alone, so the body is drained unparsed.
+		await res.text().catch(() => '');
 	};
 
 	const steerSubagentChild = (childId: string, text: string) => steerAgentChat(childId, text);
