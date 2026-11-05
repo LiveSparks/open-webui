@@ -85,5 +85,16 @@ its own.
 
 ## Local model note
 
-This wheel contains no torch, Ollama, or whisper machinery. Embeddings and
-RAG are external-only.
+The wheel installs lean by default: no torch, Ollama, or whisper machinery -
+RAG and providers stay external-only unless you opt in. Local embeddings for
+knowledge + memory come through the `local-embeddings` extra (pyproject.toml;
+torch <= 2.9.1 + sentence-transformers + accelerate): both
+`openwebui-pi-install.sh` and the in-box `openwebui-pi-update` install the
+wheel with that set as `--with` pins under `UV_TORCH_BACKEND=cpu`, which
+sources CPU torch (~180 MB) instead of the CUDA-bundled PyPI wheels (several
+GB). Install with a plain `uv tool install <wheel>` and the engine still
+routes embeddings only through external providers.
+
+Whisper and the bundled ONNX MiniLM path stay out on purpose; the
+sentence-transformers engine covers both the main and auxiliary embedding
+models the admin settings expose.

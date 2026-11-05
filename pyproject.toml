@@ -141,6 +141,17 @@ mariadb = [
 unstructured = [
     "unstructured==0.22.31",
 ]
+# Local embeddings for knowledge + memory (sentence-transformers engine).
+# Opt-in extra so plain wheel installs stay lean; torch is routed to the CPU
+# pytorch index in [tool.uv] below - never resolve it from PyPI, where the
+# linux wheels bundle CUDA and drag the nvidia dependency set in. Not
+# mirrored in backend/requirements.txt on purpose: the standard docker image
+# installs that file directly and stays external-only for now.
+local-embeddings = [
+    "torch<=2.9.1",
+    "sentence-transformers==5.5.1",
+    "accelerate==1.13.0",
+]
 
 all = [
     "psycopg2-binary==2.9.12",
@@ -170,6 +181,19 @@ build-backend = "hatchling.build"
 [tool.rye]
 managed = true
 dev-dependencies = []
+
+[tool.uv]
+# torch lives on the CPU pytorch index; PyPI's linux torch wheels bundle CUDA
+# and pull the full nvidia dependency set. The index is explicit, so only
+# torch (routed in [tool.uv.sources] below) ever resolves from it - every
+# other package keeps its PyPI pick.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [tool.hatch.metadata]
 allow-direct-references = true
