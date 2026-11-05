@@ -84,7 +84,10 @@ done
 
 echo "Stopped service; data backed up to $backup"
 echo "Installing wheel from $PI_WHEEL_URL"
-uv tool install --force --python 3.11 "$PI_WHEEL_URL"
+# --refresh: uv keys its download cache on the URL, and the moving
+# releases/latest URL keeps its name across releases - without the flag an
+# update can install the previous release's cached bytes and still exit 0.
+uv tool install --force --refresh --python 3.11 "$PI_WHEEL_URL"
 systemctl start open-webui
 
 for _ in $(seq 1 60); do

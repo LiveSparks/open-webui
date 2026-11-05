@@ -31,7 +31,8 @@ same command. The command:
 1. stops the service,
 2. copies `/var/lib/open-webui` to `/var/backups/open-webui/data-<timestamp>`
    (the five most recent backups are kept).
-3. reinstalls the tool with `uv tool install --force --python 3.11`,
+3. reinstalls the tool with `uv tool install --force --refresh --python 3.11`
+   (the refresh bypasses uv's wheel cache keyed on the shared URL),
 4. starts the service and waits up to 120 s for `/health`.
 
 Chats, users, API keys, configs, lessons, uploads, and the RAG vector store
