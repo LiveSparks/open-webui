@@ -1,5 +1,5 @@
 <script context="module" lang="ts">
-	let savedTab: 'controls' | 'files' | 'overview' = 'controls';
+	let savedTab: 'controls' | 'files' | 'overview' | 'subagents' = 'controls';
 </script>
 
 <script lang="ts">
@@ -27,6 +27,7 @@
 	import FileNav from './FileNav.svelte';
 	import PyodideFileNav from './PyodideFileNav.svelte';
 	import Overview from './Overview.svelte';
+	import SubagentsList from './ChatControls/SubagentsList.svelte';
 	import { isSavedChatId } from '$lib/utils/chatId';
 
 	const i18n = getContext('i18n');
@@ -37,6 +38,13 @@
 	export let chatId = null;
 	export let terminalContext: TerminalContext | null = null;
 	export let chatUser = null;
+
+	// The parent chat's delegation ledger, plus the handlers the sub-agents
+	// tab needs (open a child; jump the parent chat to the launch point).
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	export let delegations: Record<string, any> = {};
+	export let onOpenChild: (childId: string) => void = () => {};
+	export let onJumpToLaunch: (messageId: string) => void = () => {};
 
 	export let chatFiles = [];
 	export let params = {};
@@ -92,9 +100,11 @@
 		terminalFilesAvailable ||
 		(codeInterpreterEnabled && $config?.code?.interpreter_engine !== 'jupyter');
 	$: showOverviewTab = hasMessages;
+	$: showSubagentsTab = Object.keys(delegations ?? {}).length > 0;
 
 	// Tab fallback: if active tab becomes hidden, switch to next available
 	$: if (!showOverviewTab && activeTab === 'overview') activeTab = 'controls';
+	$: if (!showSubagentsTab && activeTab === 'subagents') activeTab = 'controls';
 	$: if (!showFilesTab && activeTab === 'files') activeTab = 'controls';
 	$: if (!showControlsTab && activeTab === 'controls') {
 		if (showFilesTab) activeTab = 'files';
@@ -102,7 +112,7 @@
 	}
 
 	// Auto-close if there are no visible tabs
-	$: if (!showControlsTab && !showFilesTab && !showOverviewTab) {
+	$: if (!showControlsTab && !showFilesTab && !showOverviewTab && !showSubagentsTab) {
 		showControls.set(false);
 	}
 
@@ -267,6 +277,17 @@
 										{$i18n.t('Overview')}
 									</button>
 								{/if}
+								{#if showOverviewTab}
+									<button
+										class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'overview'
+											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
+											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'subagents')}
+									>
+										{$i18n.t('Sub-agents')}
+									</button>
+								{/if}
 							</div>
 							<button
 								class="p-1 rounded-lg text-gray-500 dark:text-gray-400"
@@ -287,7 +308,7 @@
 						</div>
 
 						<div
-							class="flex-1 min-h-0 {activeTab === 'overview'
+							class="flex-1 min-h-0 {activeTab === 'overview' || activeTab === 'subagents'
 								? 'h-full'
 								: activeTab === 'controls'
 									? 'overflow-y-auto px-3 pt-1'
@@ -302,6 +323,8 @@
 										showMessage(node.data.message, true);
 									}}
 								/>
+							{:else if activeTab === 'subagents'}
+								<SubagentsList {delegations} {onOpenChild} {onJumpToLaunch} />
 							{:else if activeTab === 'files' && terminalFilesAvailable && $selectedTerminalId}
 								<FileNav {onAskFile} {chatId} bind:terminalContext />
 							{:else if activeTab === 'files' && codeInterpreterEnabled}
@@ -392,6 +415,17 @@
 										{$i18n.t('Overview')}
 									</button>
 								{/if}
+								{#if showOverviewTab}
+									<button
+										class="px-2.5 py-0.5 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'overview'
+											? 'bg-gray-100/40 dark:bg-gray-800/25 font-normal text-gray-700 dark:text-gray-200'
+											: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100/30 dark:hover:bg-gray-800/20 hover:text-gray-600 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'subagents')}
+									>
+										{$i18n.t('Sub-agents')}
+									</button>
+								{/if}
 							</div>
 							<button
 								class="p-1 rounded-lg text-gray-500 dark:text-gray-400"
@@ -412,7 +446,7 @@
 						</div>
 
 						<div
-							class="flex-1 min-h-0 {activeTab === 'overview'
+							class="flex-1 min-h-0 {activeTab === 'overview' || activeTab === 'subagents'
 								? 'h-full'
 								: activeTab === 'controls'
 									? 'overflow-y-auto px-3 pt-1'
@@ -432,6 +466,8 @@
 										showMessage(node.data.message, true);
 									}}
 								/>
+							{:else if activeTab === 'subagents'}
+								<SubagentsList {delegations} {onOpenChild} {onJumpToLaunch} />
 							{:else if activeTab === 'files' && terminalFilesAvailable && $selectedTerminalId}
 								<FileNav {onAskFile} overlay={dragged} {chatId} bind:terminalContext />
 							{:else if activeTab === 'files' && codeInterpreterEnabled}

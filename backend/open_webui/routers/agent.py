@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -173,6 +174,100 @@ async def fork_session(client: httpx.AsyncClient, chat_id: str, keep_turns: int)
     response = await client.post(f'/sessions/{chat_id}/fork', json={'keepTurns': keep_turns})
     response.raise_for_status()
     return response.json()
+
+
+_STEER_PENDING_KEY = 'agent:steer_pending:{chat_id}'
+
+
+async def queue_steer(redis, chat_id: str, entry: dict) -> None:
+    """Book the accepted steer so its consumption can materialize the user turn.
+
+    pi owns the queue (its queue_update events carry remaining steering
+    texts); this trail records what was queued against which turn, so the
+    diff at consumption can insert the normal user message the steered turn
+    deserves. Best effort: a lost entry only loses the visible row."""
+    try:
+        await redis.rpush(_STEER_PENDING_KEY.format(chat_id=chat_id), json.dumps(entry))
+    except Exception:
+        log.exception('agent bridge: pending-steer bookkeeping failed for chat %s', chat_id)
+
+
+async def take_consumed_steers(redis, chat_id: str, pending: list[str]) -> tuple[list[dict], list[dict]]:
+    """Settle the pending-steer trail against pi's current steering queue.
+
+    Returns (consumed, remaining): entries whose text no longer appears in
+    pi's steering list were delivered at a turn boundary and must land on
+    the record as ordinary user messages."""
+    from collections import Counter
+
+    key = _STEER_PENDING_KEY.format(chat_id=chat_id)
+    try:
+        stored = [json.loads(raw) for raw in await redis.lrange(key, 0, -1) if raw]
+    except Exception:
+        log.exception('agent bridge: pending-steer read failed for chat %s', chat_id)
+        return [], []
+
+    counts = Counter(pending)
+    consumed: list[dict] = []
+    remaining: list[dict] = []
+    for entry in stored:
+        if not isinstance(entry, dict) or not isinstance(entry.get('text'), str):
+            continue
+        if counts.get(entry['text'], 0) > 0:
+            counts[entry['text']] -= 1
+            remaining.append(entry)
+        else:
+            consumed.append(entry)
+    for entry in consumed:
+        try:
+            await redis.lrem(key, 1, json.dumps(entry))
+        except Exception:
+            pass
+    return consumed, remaining
+
+
+async def materialize_steered_turns(redis, chat_id: str, metadata: dict, user, event_emitter, pending_texts: list[str]) -> None:
+    """Deliver the consumed steers as record rows, pi-style.
+
+    Each consumed steer becomes an ordinary user message node chained under
+    the turn it steered (the anchor pinned at steer acceptance), so the chat
+    shows it under the sender's name in the right place — plus one queue
+    reconciliation event so every client's pending pill drops in step."""
+    consumed, remaining = await take_consumed_steers(redis, chat_id, pending_texts)
+    model_id = metadata.get('model') or None
+    delivered_nodes = []
+    for entry in consumed:
+        node = {
+            'id': str(uuid.uuid4()),
+            'parentId': entry.get('anchor') or metadata.get('message_id'),
+            'childrenIds': [],
+            'role': 'user',
+            'content': entry['text'],
+            'user_id': user.id,
+            'user': {'id': user.id, 'name': user.name},
+            **({'models': [model_id]} if model_id else {}),
+            'timestamp': int(time.time()),
+        }
+        delivered_nodes.append(node)
+        try:
+            await Chats.update_chat_by_id(chat_id, {'history': {'messages': {node['id']: node}}})
+        except Exception:
+            log.exception('agent bridge: steered-turn persist failed for chat %s', chat_id)
+    try:
+        await event_emitter(
+            {
+                'type': 'chat:steer:queue',
+                'data': {
+                    'pending': [entry['text'] for entry in remaining],
+                    'delivered': [
+                        {'id': node['id'], 'parentId': node['parentId'], 'content': node['content']}
+                        for node in delivered_nodes
+                    ],
+                },
+            }
+        )
+    except Exception:
+        log.exception('agent bridge: steer queue event failed for chat %s', chat_id)
 
 
 async def steer_session(client: httpx.AsyncClient, chat_id: str, message: str) -> dict:
@@ -371,6 +466,18 @@ class PiEventTranslator:
                 yield line
             self.lines.clear()
         if event_type == 'message_start' and (data.get('message') or {}).get('role') == 'assistant':
+            return
+
+        if event_type == 'queue_update':
+            # Steering queue changes (steer + consumption): the pending list
+            # lets the agent handler settle the trail and materialize the
+            # consumed steers as ordinary user message rows.
+            await self._emit(
+                {
+                    'type': 'chat:steer:queue',
+                    'data': {'steering': data.get('steering') or []},
+                }
+            )
             return
 
         if event_type == 'owui_interaction':
@@ -816,6 +923,19 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
                     steered = True
             if steered:
                 log.info('agent bridge: steered chat %s (%s)', chat_id, disposition)
+                # pi-parity bookkeeping: the record row lands at consumption
+                # (the running stream's queue_update pair), not at send time.
+                request_redis = getattr(request, 'app', None) and getattr(request.app, 'state', None)
+                if request_redis is not None and getattr(request_redis, 'redis', None):
+                    await queue_steer(
+                        request.app.state.redis,
+                        chat_id,
+                        {
+                            'text': prompt_text,
+                            'anchor': metadata.get('message_id'),
+                            'user_id': user.id,
+                        },
+                    )
                 return StreamingResponse(
                     _steer_acknowledgement(),
                     media_type='text/event-stream',
@@ -1076,6 +1196,23 @@ async def agent_chat_response_handler(response: StreamingResponse, ctx: dict):
 
             direct = data.get('x-owui-event')
             if isinstance(direct, dict):
+                if direct.get('type') == 'chat:steer:queue':
+                    # pi-parity steering records (any chat): pi's queue just
+                    # changed for this run; settle the trail, persist the
+                    # consumed steers as ordinary user rows, and reconcile
+                    # every client's pending pill.
+                    try:
+                        await materialize_steered_turns(
+                            request.app.state.redis,
+                            chat_id,
+                            metadata,
+                            user,
+                            event_emitter,
+                            (direct.get('data') or {}).get('steering') or [],
+                        )
+                    except Exception:
+                        log.exception('agent bridge: steer consumption settle failed')
+                    continue
                 if direct.get('type') == 'chat:interaction:pending':
                     # A gated tool call awaits the browser: persist the pending
                     # card now (the approval route reads the saved message) and

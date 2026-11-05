@@ -53,6 +53,8 @@ from open_webui.tools.builtin import (
     create_calendar_event,
     create_tasks,
     delegate_task,
+    stop_subagent,
+    steer_subagent,
     delete_automation,
     delete_calendar_event,
     delete_memory,
@@ -784,7 +786,7 @@ async def get_builtin_tools(
         and getattr(request.state, 'direct', False) is not True
         and not is_temporary_chat_id(metadata.get('chat_id'))
     ):
-        builtin_functions.extend([delegate_task, timer])
+        builtin_functions.extend([delegate_task, timer, stop_subagent, steer_subagent])
 
     # Add memory tools when memory is enabled and the model allows this builtin category.
     if (
@@ -944,7 +946,17 @@ async def get_builtin_tools(
         builtin_functions = [
             func
             for func in builtin_functions
-            if func.__name__ not in {'add_memory', 'delete_memory', 'replace_memory_content', 'update_memory'}
+            if func.__name__
+            not in {
+                'add_memory',
+                'delete_memory',
+                'replace_memory_content',
+                'update_memory',
+                'delegate_task',
+                'stop_subagent',
+                'steer_subagent',
+                'timer',
+            }
         ]
 
     for func in builtin_functions:

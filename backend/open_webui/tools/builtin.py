@@ -1763,6 +1763,59 @@ async def delegate_task(
     )
 
 
+async def stop_subagent(
+    subagent_chat_id: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __chat_id__: str = None,
+) -> str:
+    """Stop a background sub-agent you delegated earlier.
+
+    :param subagent_chat_id: The sub-agent chat id from the delegate_task result
+    :return: JSON status of the cancellation
+    """
+    if __request__ is None:
+        return 'Error: request context not available.'
+    if getattr(__request__.state, 'internal', False) is True:
+        return 'Error: sub-agents cannot manage other sub-agents.'
+    from open_webui.utils.subagents import stop_child
+
+    return await stop_child(
+        subagent_chat_id,
+        request=__request__,
+        user_data=__user__ or {},
+        parent_chat_id=__chat_id__ or '',
+    )
+
+
+async def steer_subagent(
+    subagent_chat_id: str,
+    message: str,
+    __request__: Request = None,
+    __user__: dict = None,
+    __chat_id__: str = None,
+) -> str:
+    """Send steering text to a running sub-agent; it lands at the sub-agent's next turn boundary.
+
+    :param subagent_chat_id: The sub-agent chat id from the delegate_task result
+    :param message: The steering text; delivered after the sub-agent's current step
+    :return: JSON disposition, or an error string when the run is not live
+    """
+    if __request__ is None:
+        return 'Error: request context not available.'
+    if getattr(__request__.state, 'internal', False) is True:
+        return 'Error: sub-agents cannot manage other sub-agents.'
+    from open_webui.utils.subagents import steer_child
+
+    return await steer_child(
+        subagent_chat_id,
+        message,
+        request=__request__,
+        user_data=__user__ or {},
+        parent_chat_id=__chat_id__ or '',
+    )
+
+
 async def timer(
     prompt: str,
     at: str,
