@@ -240,7 +240,7 @@ async def take_consumed_steers(redis, chat_id: str, pending: list[str]) -> tuple
     from collections import Counter
 
     key = _STEER_PENDING_KEY.format(chat_id=chat_id)
-    stored, stored_in_redis = _trail_load(redis, chat_id)
+    stored, stored_in_redis = await _trail_load(redis, chat_id)
     if not stored:
         return [], []
 
