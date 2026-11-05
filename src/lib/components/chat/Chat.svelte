@@ -3346,6 +3346,9 @@
 				chat_id: chatIdArg,
 				// The running turn is the anchor: the steered row chains
 				// under it when pi delivers the text at its turn boundary.
+				// `steering` is the route's steer marker — a first turn
+				// (which also holds no user row) must not read as a steer.
+				steering: true,
 				id: leafId,
 				parent_id: leafId ? (messagesMap[leafId]?.parentId ?? null) : null,
 				background_tasks: {}

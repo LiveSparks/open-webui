@@ -1616,9 +1616,10 @@ async def chat_completion(
                     reserved_ids = [entry['message_id'] for entry in message_ids if entry.get('message_id')]
                     messages_map = ((chat.chat or {}).get('history') or {}).get('messages') or {}
                     mid_turn_steer = (
-                        not user_message
+                        is_agent_model(model_id)
+                        and form_data.pop('steering', None) is True
+                        and not user_message
                         and bool(reserved_ids)
-                        and is_agent_model(model_id)
                         and all(
                             (record := messages_map.get(mid)) is not None
                             and record.get('role') == 'assistant'
