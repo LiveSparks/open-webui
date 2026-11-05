@@ -364,6 +364,8 @@ def _strip_child_tools(tools_dict: dict[str, dict], chat) -> dict[str, dict]:
     stripped = {
         'delegate_task',
         'timer',
+        'stop_subagent',
+        'steer_subagent',
         'add_memory',
         'delete_memory',
         'replace_memory_content',

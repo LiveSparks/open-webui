@@ -53,6 +53,130 @@ _foreground_semaphore: asyncio.Semaphore | None = None
 _parent_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
+LEDGER_LIMIT = 300
+
+
+async def _upsert_parent_delegation(
+    parent_chat_id: str, child_chat_id: str, *, fields: dict
+) -> None:
+    """Keep the parent chat's delegation ledger in step (parent-record meta).
+
+    The ledger lives at chat.meta.delegations keyed by child chat id; it is
+    the frontend list's only shape (one row per delegation, clickable child,
+    real state, jump source). Best effort: a lost write only dulls the UI,
+    never the run."""
+    try:
+        async with Chats._chat_transaction(parent_chat_id) as (_, chat):
+            if not chat or not chat.chat:
+                return
+            stored = dict(chat.chat)
+            chat_meta = dict(stored.get('meta') or {})
+            ledger = dict(chat_meta.get('delegations') or {})
+            ledger[child_chat_id] = {**ledger.get(child_chat_id, {}), **fields}
+            # A chat runs long and fills with delegations: past the cap the
+            # oldest finished entries drop; running ones always stay.
+            if len(ledger) > LEDGER_LIMIT:
+                finished = sorted(
+                    (
+                        key
+                        for key, entry in ledger.items()
+                        if entry.get('status') != 'running'
+                    ),
+                    key=lambda key: ledger[key].get('dispatched_at') or 0,
+                )
+                for key in finished[: len(ledger) - LEDGER_LIMIT]:
+                    ledger.pop(key, None)
+            chat_meta['delegations'] = ledger
+            stored['meta'] = chat_meta
+            chat.chat = stored
+    except Exception as exc:
+        log.warning('subagent: ledger update for child %s failed: %s', child_chat_id[:8], exc)
+
+
+_DELEGATION_MANAGEMENT_TOOLS = {'stop_subagent', 'steer_subagent'}
+
+
+async def _verify_owned_delegation(parent_chat_id: str, child_chat_id: str, user_id: str) -> ChatModel | None:
+    """The delegation ledger is the authorization surface: only the parent's
+    own children steer, stop, or report through these tools."""
+    parent = await Chats.get_chat_by_id_and_user_id(parent_chat_id, user_id)
+    if not parent:
+        return None
+    ledger = ((parent.chat or {}).get('meta') or {}).get('delegations') or {}
+    return parent if isinstance(ledger.get(child_chat_id), dict) else None
+
+
+async def stop_child(
+    child_chat_id: str,
+    *,
+    request: Request,
+    user_data: dict,
+    parent_chat_id: str,
+) -> str:
+    """Cancel a running delegation from the parent's own turn (agent tool)."""
+    user_id = (user_data or {}).get('id')
+    if not child_chat_id or not user_id or not parent_chat_id:
+        return 'Error: chat and user context are required.'
+    if not await _verify_owned_delegation(parent_chat_id, child_chat_id, user_id):
+        return 'Error: no delegation of this chat runs under that id.'
+    from open_webui.tasks import stop_task
+
+    try:
+        result = await stop_task(request.app.state.redis, child_chat_id)
+    except ValueError as exc:
+        return f'Error: {exc}'
+    except Exception as exc:
+        return f'Error: {exc}'
+    return JSONCodec.dumps({'subagent_chat_id': child_chat_id, 'stopped': True, 'task': result}, ensure_ascii=False)
+
+
+async def steer_child(
+    child_chat_id: str,
+    message: str,
+    *,
+    request: Request,
+    user_data: dict,
+    parent_chat_id: str,
+) -> str:
+    """Inject steering text into a running delegation (agent tool).
+
+    Same delivery contract as the browser steer: pi queues the text and the
+    consumed turn materializes on the child's record at its boundary."""
+    user_id = (user_data or {}).get('id')
+    message = (message or '').strip()
+    if not child_chat_id or not message or not user_id or not parent_chat_id:
+        return 'Error: chat and user context are required, and the message must not be empty.'
+    if not await _verify_owned_delegation(parent_chat_id, child_chat_id, user_id):
+        return 'Error: no delegation of this chat runs under that id.'
+    from open_webui.routers.agent import _client, queue_steer, steer_session
+
+    try:
+        disposition = await steer_session(_client(), child_chat_id, message)
+    except httpx.HTTPStatusError as exc:
+        detail = ''
+        try:
+            detail = (exc.response.json() or {}).get('error', '')
+        except Exception:
+            pass
+        if exc.response.status_code == 409:
+            return f'Error: the sub-agent is not running ({detail or "no active run"}).'
+        if exc.response.status_code == 404:
+            return f'Error: no running sidecar session for {child_chat_id}.'
+        return f'Error: {detail or exc}'
+    except Exception as exc:
+        return f'Error: {exc}'
+    child = await Chats.get_chat_by_id(child_chat_id)
+    anchor = ((child.chat or {}).get('history') or {}).get('currentId') if child else None
+    await queue_steer(
+        request.app.state.redis,
+        child_chat_id,
+        {'text': message, 'anchor': anchor, 'user_id': user_id, 'by': 'agent'},
+    )
+    return JSONCodec.dumps(
+        {'subagent_chat_id': child_chat_id, 'disposition': disposition, 'steered': message}, ensure_ascii=False
+    )
+
+
 async def _sidecar_child_edge(chat_id: str, parent_chat_id: str, mode: str, *, delivered: bool = False) -> None:
     """Tell the sidecar where a delegation lives, best effort (issue 29).
 
@@ -356,6 +480,11 @@ async def delegate(
     # same boundary an ordinary chat loop gets today, so a delegation aborts
     # only when turns are abnormally high.
     max_iterations = int(config.get('subagents.max_iterations') or 256)
+    # -1 = unlimited, the same convention as the concurrency knobs. Both loops
+    # read uncapped from it: the OWUI loop treats an explicit None as no cap,
+    # and the pi loop treats an absent or non-positive maxTurns the same way.
+    if max_iterations < 0:
+        max_iterations = None
     max_output = int(config.get('subagents.max_output') or 30_000)
     if max_concurrent != -1:
         max_concurrent = max(1, max_concurrent)
@@ -729,6 +858,18 @@ async def delegate(
             status=pending_message['meta'].get('status'),
             content=pending_message['content'][:60],
         )
+        await _upsert_parent_delegation(
+            parent_chat_id,
+            chat_id,
+            fields={
+                'status': (
+                    'completed'
+                    if result.get('status') == 'completed'
+                    else 'cancelled' if result.get('status') == 'interrupted' else 'error'
+                ),
+                'finished_at': int(time.time()),
+            },
+        )
         if pending_message['meta'].get('status') == 'pending':
             from open_webui.socket.main import sio
 
@@ -751,6 +892,18 @@ async def delegate(
             raise asyncio.CancelledError
         return result
 
+    await _upsert_parent_delegation(
+        parent_chat_id,
+        chat_id,
+        fields={
+            'id': delegation_id,
+            'task': task,
+            'mode': mode,
+            'parent_message_id': parent_message_id,
+            'status': 'running',
+            'dispatched_at': int(time.time()),
+        },
+    )
     await _sidecar_child_edge(chat_id, parent_chat_id, mode)
     try:
         _, child_task = await create_task(
@@ -764,6 +917,11 @@ async def delegate(
                 _background_active.discard(delegation_id)
         elif foreground_semaphore:
             foreground_semaphore.release()
+        await _upsert_parent_delegation(
+            parent_chat_id,
+            chat_id,
+            fields={'status': 'error', 'finished_at': int(time.time())},
+        )
         return f'Error: {exc}'
 
     if background:
@@ -783,10 +941,28 @@ async def delegate(
     except asyncio.CancelledError:
         if asyncio.current_task() and asyncio.current_task().cancelling():
             raise
+        await _upsert_parent_delegation(
+            parent_chat_id,
+            chat_id,
+            fields={'status': 'cancelled', 'finished_at': int(time.time())},
+        )
         return 'Error: sub-agent was cancelled.'
     except Exception as exc:
+        await _upsert_parent_delegation(
+            parent_chat_id,
+            chat_id,
+            fields={'status': 'error', 'finished_at': int(time.time())},
+        )
         return f'Error: {exc}'
 
+    await _upsert_parent_delegation(
+        parent_chat_id,
+        chat_id,
+        fields={
+            'status': 'completed' if result.get('status') == 'completed' else 'error',
+            'finished_at': int(time.time()),
+        },
+    )
     if result.get('status') != 'completed':
         return f'Error: {result.get("error") or "sub-agent failed."}'
     return result.get('summary') or 'Sub-agent produced no output.'
