@@ -994,17 +994,16 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
                 log.info('agent bridge: steered chat %s (%s)', chat_id, disposition)
                 # pi-parity bookkeeping: the record row lands at consumption
                 # (the running stream's queue_update pair), not at send time.
-                request_redis = getattr(request, 'app', None) and getattr(request.app, 'state', None)
-                if request_redis is not None and getattr(request_redis, 'redis', None):
-                    await queue_steer(
-                        request.app.state.redis,
-                        chat_id,
-                        {
-                            'text': prompt_text,
-                            'anchor': metadata.get('message_id'),
-                            'user_id': user.id,
-                        },
-                    )
+                # queue_steer keeps an in-process trail when redis is absent.
+                await queue_steer(
+                    request.app.state.redis,
+                    chat_id,
+                    {
+                        'text': prompt_text,
+                        'anchor': metadata.get('message_id'),
+                        'user_id': user.id,
+                    },
+                )
                 return StreamingResponse(
                     _steer_acknowledgement(),
                     media_type='text/event-stream',
