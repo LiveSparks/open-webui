@@ -25,7 +25,7 @@
 			backgroundEnabled = config?.SUBAGENTS_BACKGROUND_ENABLED ?? false;
 			maxConcurrent = Number(config?.SUBAGENTS_MAX_CONCURRENT) || 20;
 			maxAsync = Number(config?.SUBAGENTS_MAX_ASYNC) || 20;
-			maxIterations = Number(config?.SUBAGENTS_MAX_ITERATIONS) || 30;
+			maxIterations = Number(config?.SUBAGENTS_MAX_ITERATIONS) || 256;
 			maxOutput = Number(config?.SUBAGENTS_MAX_OUTPUT) || 30000;
 			systemPrompt = config?.SUBAGENTS_SYSTEM_PROMPT ?? '';
 		} catch (error) {
@@ -138,12 +138,11 @@
 								id="sa-iterations"
 								type="number"
 								bind:value={maxIterations}
-								min="1"
-								max="100"
+								min="-1"
 								class="h-7 w-16 rounded-lg border border-gray-100/50 bg-gray-50/40 px-2 text-xs text-gray-700 outline-hidden transition-colors focus:border-blue-400 dark:border-white/[0.04] dark:bg-white/[0.03] dark:text-gray-300 dark:focus:border-blue-500"
 							/>
 							<span class="text-[0.6875rem] text-gray-400 dark:text-gray-600">
-								{$i18n.t('tool loops per sub-agent')}
+								{$i18n.t('settings.admin.subagents.maxIterations.hint')}
 							</span>
 						</div>
 					</div>

@@ -47,6 +47,7 @@
 		showFileNavPath,
 		showFileNavDir,
 		chatRequestQueues,
+		jumpToMessage,
 		desktopEvent
 	} from '$lib/stores';
 	import { refreshChatList, refreshFolderChatLists } from '$lib/stores/chatList';
@@ -138,10 +139,7 @@
 	import NotificationToast from '../NotificationToast.svelte';
 	import Spinner from '../common/Spinner.svelte';
 	import Modal from '../common/Modal.svelte';
-	import Dropdown from '../common/Dropdown.svelte';
-	import DropdownMenu from '../common/DropdownMenu.svelte';
-	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
-	import { isEmbedWindow } from '../common/FullHeightIframe.svelte';
+				import { isEmbedWindow } from '../common/FullHeightIframe.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
@@ -1513,6 +1511,49 @@
 		// targets. Fire-and-forget so the parent's own event path never waits.
 		if (event?.chat_id && event.chat_id !== $chatId) {
 			void runningSubAgents?.handleSocketEvent(event);
+		}
+		if (event?.data?.type === 'chat:steer:queue') {
+			// pi-style steering visibility (any chat): pi's steering queue
+			// changed for this chat. Queued pills reconcile to the pending
+			// list; consumed steers land as normal user rows under the anchor
+			// turn, in every open window (here or the running card).
+			const data = event?.data?.data ?? {};
+			const pending = Array.isArray(data.pending) ? (data.pending as string[]) : [];
+			if (!event?.shared && $chatId && event.chat_id === $chatId) {
+				steerQueue = steerQueue.filter((entry) => pending.includes(entry.prompt));
+				for (const node of data.delivered ?? []) {
+					if (
+						node?.id &&
+						node.parentId &&
+						history?.messages?.[node.parentId] &&
+						!history.messages[node.id]
+					) {
+						history.messages[node.parentId].childrenIds = [
+							...(history.messages[node.parentId].childrenIds ?? []),
+							node.id
+						];
+						history.messages[node.id] = {
+							id: node.id,
+							parentId: node.parentId,
+							childrenIds: [],
+							role: 'user',
+							content: node.content ?? '',
+							user: { id: $user?.id, name: $user?.name },
+							user_id: $user?.id,
+							timestamp: Math.floor(Date.now() / 1000),
+							models: selectedModels
+						};
+						history = history;
+					}
+				}
+				if (steerQueue.length === 0 && (data.delivered ?? []).length > 0) {
+					lastSteerAt = 0;
+				}
+				void tick().then(() => {
+					if (autoScroll) scrollToBottom();
+				});
+			}
+			return;
 		}
 		if (event?.data?.type === 'chat:presence') {
 			if (!$socket?.connected || event.chat_id !== $chatId || event.chat_id !== joinedChatId)
@@ -3214,7 +3255,51 @@
 	// machine fills when no choice is stored, and a recorded machine that is
 	// gone stays put — the next turn fails closed rather than silently moving.
 	$: isSubagentChat = (chat?.meta as Record<string, unknown> | undefined)?.type === 'subagent';
-	$: subagentParentChatId =
+	// ledger (see RunningSubAgents props)
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	let parentDelegations: Record<string, any> = {};
+	$: parentDelegations = (chat as any)?.chat?.meta?.delegations ?? {};
+	let parentChatTitle = '';
+	const loadParentChatTitle = async (parentId: string | null) => {
+		if (typeof parentId !== 'string' || !parentId) {
+			parentChatTitle = '';
+			return;
+		}
+		try {
+			const record = await getChatById(localStorage.token, parentId);
+			parentChatTitle = record?.title ?? '';
+		} catch {
+			parentChatTitle = '';
+		}
+	};
+	$: void loadParentChatTitle(subagentParentChatId);
+	const dismissSubagentChild = async (childId: string) => {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const meta = (chat as any)?.chat?.meta;
+		if (!chat?.id || !meta || typeof meta.delegations?.[childId] !== 'object') return;
+		const next = JSON.parse(JSON.stringify(meta.delegations));
+		next[childId].dismissed = true;
+		const updated = await updateChatById(localStorage.token, chat.id, {
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			meta: { ...meta, delegations: next }
+		}).catch(() => null);
+		if (updated) chat = updated;
+	};
+	const jumpToDelegationLaunch = async (messageId: string) => {
+		if (!chat?.id) return;
+		if ($chatId === chat.id && history?.messages?.[messageId]) {
+			void showMessage(history.messages[messageId], true);
+			return;
+		}
+		jumpToMessage.set({ chatId: chat.id, messageId });
+		await goto(`/c/${chat.id}`);
+	};
+	$: if (chat && $jumpToMessage && $jumpToMessage.chatId === chat.id && history?.messages?.[$jumpToMessage.messageId]) {
+		const target = $jumpToMessage;
+		jumpToMessage.set(null);
+		void showMessage(history.messages[target.messageId], true);
+	}
+		$: subagentParentChatId =
 		typeof (chat?.meta as Record<string, unknown> | undefined)?.parent_chat_id === 'string'
 			? ((chat?.meta as Record<string, unknown>)?.parent_chat_id as string)
 			: null;
@@ -3222,45 +3307,33 @@
 		typeof chat?.chat?.meta?.terminalId === 'string' && chat.chat.meta.terminalId
 			? (chat.chat.meta.terminalId as string)
 			: null;
-	$: chatMachines = ($terminalServers ?? []).filter((machine: any) => machine.id);
-	$: effectiveMachineId = recordMachineId ?? $selectedTerminalId;
-	$: effectiveMachine = chatMachines.find((machine: any) => machine.id === effectiveMachineId);
-	$: effectiveMachineName = effectiveMachine?.name || effectiveMachineId || '';
-	$: effectiveMachineGone = !!effectiveMachineId && !effectiveMachine;
-
-	const selectChatMachine = (machineId: string | null) => {
-		selectedTerminalId.set(machineId);
-	};
-
 	// A steered child send rides the child's own loop: the turn persists on the
 	// child's record and a running child session takes the text at its next
 	// step — the same steer route the composer's own send uses. A child that is
 	// not running gets an ordinary new turn, so the card keeps the input
 	// disabled unless the child is live.
-	const steerSubagentChild = async (childId: string, text: string) => {
+	// Steer an agent-routed chat that is already running (any chat: the
+	// parent from the card, the child from the card or its own composer).
+	// The steered row is not this call's job: the backend materializes the
+	// normal user message when pi actually consumes the steer (the run's
+	// own queue_update boundary) and reconciles every open window by event.
+	const steerAgentChat = async (chatIdArg: string, text: string) => {
 		const token = localStorage.token;
-		const record = await getChatById(token, childId);
+		const record = await getChatById(token, chatIdArg);
 		const chatPayload = record?.chat ?? {};
 		const messagesMap = chatPayload.history?.messages ?? {};
 		const leafId = chatPayload.history?.currentId ?? null;
 		const branch = leafId ? createMessagesList({ messages: messagesMap, currentId: leafId }, leafId) : [];
 		const modelId = chatPayload.models?.[0] ?? branch[0]?.model ?? selectedModels[0];
-		if (!modelId) throw new Error('The sub-agent chat has no model.');
-		const userMessage = {
-			id: uuidv4(),
-			parentId: leafId,
-			childrenIds: [],
-			role: 'user',
-			user: { id: $user?.id, name: $user?.name },
-			user_id: $user?.id,
-			content: text,
-			timestamp: Math.floor(Date.now() / 1000),
-			models: [modelId],
-			meta: { internal: record?.meta?.internal === true, type: record?.meta?.type ?? 'subagent' }
-		};
-		const res = await generateOpenAIChatCompletion(
-			token,
-			{
+		if (!modelId) throw new Error('The chat has no model.');
+		const res = await fetch(`${WEBUI_BASE_URL}/api/chat/completions`, {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${token}`,
+				'Content-Type': 'application/json'
+			},
+			credentials: 'include',
+			body: JSON.stringify({
 				model: modelId,
 				messages: [...branch, { role: 'user', content: text }],
 				params: { ...$settings?.params },
@@ -3270,15 +3343,38 @@
 				features: {},
 				variables: {},
 				session_id: $socket?.id,
-				chat_id: childId,
-				id: uuidv4(),
-				parent_id: leafId,
-				user_message: userMessage,
+				chat_id: chatIdArg,
+				// The running turn is the anchor: the steered row chains
+				// under it when pi delivers the text at its turn boundary.
+				id: leafId,
+				parent_id: leafId ? (messagesMap[leafId]?.parentId ?? null) : null,
 				background_tasks: {}
-			},
-			`${WEBUI_BASE_URL}/api`
-		);
-		if (!res) throw new Error('The sub-agent did not take the message.');
+			})
+		});
+		if (!res.ok) {
+			let detail = '';
+			try {
+				const body = await res.json();
+				detail = body?.detail ?? '';
+			} catch {
+				/* status line only */
+			}
+			throw new Error(detail || `The steer was refused (${res.status}).`);
+		}
+	};
+
+	const steerSubagentChild = (childId: string, text: string) => steerAgentChat(childId, text);
+
+	// Stop a child run from the parent card: the redis task registry holds
+	// the delegation under the child chat id, so the chat-scoped stop route
+	// cancels the right arm. The cancel unwinds into the ledger's status
+	// updates (run_reserved / run_background) and then into the card row.
+	const stopSubagentChild = async (childId: string) => {
+		try {
+			await stopTasksByChatId(localStorage.token, childId);
+		} catch (e) {
+			toast.error(`${e}`);
+		}
 	};
 
 	// The steered turn's own assistant node stays empty (the run's own stream
@@ -4105,28 +4201,22 @@
 		if (isGenerating) {
 			if (bridgeRequest) return { status: 'deferred' };
 			if (isAgentRouted(selectedModels) && files.length === 0) {
-				// Steering everywhere (variant A): the running agent-loop turn keeps
-				// running on its own stream; this send posts to the steer route and
-				// shows as a queued note until the run's next turn addresses it.
-				// File-carried sends keep the composer queue — the steer route takes
-				// a message text only.
+				// Steering everywhere (variant A), pi-style: the running agent-loop
+				// turn keeps running on its own stream; this send posts to the steer
+				// route and stays a queued note until pi delivers it at the turn
+				// boundary. The record row is the backend's job — it lands under the
+				// sender's name at the moment of consumption, per the steer:queue
+				// event this window reconciles below.
 				steerQueue = [...steerQueue, { id: uuidv4(), prompt: userPrompt }];
 				messageInput?.setText('');
 				prompt = '';
 				lastSteerAt = Date.now();
 				try {
-					await submitPrompt(userPrompt, []);
-				} finally {
-					// Keep the window open for the ack frame that may still be in
-					// flight; the timestamp below bounds it.
-				}
-				// The ack frame can beat the POST's own resolution back to the
-				// browser: collapse the shell here too when it already completed.
-				const steeredCurrentId = history.currentId;
-				if (steeredCurrentId && steeredCurrentId !== lastMessage?.id) {
-					steerAckIds.add(steeredCurrentId);
-					const ackShell = history.messages[steeredCurrentId];
-					if (ackShell?.done) collapseSteerAckShell(steeredCurrentId);
+					await steerAgentChat($chatId, userPrompt);
+				} catch (error) {
+					console.error(error);
+					steerQueue = steerQueue.filter((entry) => entry.prompt !== userPrompt);
+					toast.error(`${error}`);
 				}
 				return { status: 'rejected' };
 			}
@@ -5457,79 +5547,18 @@
 								}}
 							>
 							<div class=" h-full w-full flex flex-col">
-								{#if isSubagentChat}
-									<!-- The child ribbon and the machine takeover banner (variant C): -->
-									<!-- takeover is the one intrusive act, so it is the one loud -->
-									<!-- treatment. The choice applies next turn and stores on the -->
-									<!-- child's record. -->
-									<div class="mx-3 mt-2 shrink-0">
+									{#if isSubagentChat}
 										<div
-											class="flex items-center justify-between gap-2 rounded-t-2xl border border-b-0 border-amber-200 bg-amber-50/60 px-3 py-1 text-[0.6875rem] text-amber-700/80 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-300/70"
+											class="mx-3 mt-2 flex shrink-0 items-center justify-between gap-2 rounded-2xl border border-gray-100/50 bg-gray-50/40 px-3 py-1 text-[0.6875rem] text-gray-500 dark:border-gray-800/50 dark:bg-gray-900/40 dark:text-gray-400"
 										>
-											<span>{$i18n.t('Sub-agent')}</span>
+											<span class="shrink-0">{$i18n.t('Sub-agent')}</span>
 											{#if subagentParentChatId}
-												<button
-													type="button"
-													class="truncate hover:underline"
-													on:click={() => goto(`/c/${subagentParentChatId}`)}
-												>
-													{$i18n.t('Back to parent chat')}
+												<button type="button" class="flex min-w-0 items-center gap-1 truncate hover:underline" on:click={() => goto(`/c/${subagentParentChatId}`)}>
+													<span class="truncate">{parentChatTitle || $i18n.t('Parent chat')}</span>
 												</button>
 											{/if}
 										</div>
-										<div
-											class="flex items-center justify-between gap-2 rounded-b-2xl border border-amber-300 bg-amber-50 px-3 py-2 dark:border-amber-900/50 dark:bg-amber-950/30"
-										>
-											<Dropdown align="end">
-												<Tooltip content={$i18n.t('Select the machine this sub-agent runs on next turn')}>
-													<button
-														type="button"
-														class="flex min-w-0 items-center gap-1.5 text-xs font-medium text-amber-700 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-300"
-													>
-														<span class="truncate">
-															{effectiveMachineGone
-															? $i18n.t('Machine gone: {{machineId}}', { machineId: effectiveMachineId })
-															: effectiveMachineName
-																? $i18n.t('Taking over from {{machine}}', { machine: effectiveMachineName })
-																: $i18n.t('No machine selected')}
-														</span>
-														<ChevronDown className="size-3 shrink-0" />
-													</button>
-												</Tooltip>
-												<div slot="content">
-													<DropdownMenu className="min-w-56 max-w-56">
-														{#each chatMachines as machine (machine.id)}
-															<button
-																type="button"
-																class="flex w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left text-[0.8125rem] hover:bg-gray-50/40 dark:hover:bg-gray-800/40 {effectiveMachineId === machine.id
-																	? 'bg-gray-50/40 dark:bg-gray-800/40'
-																	: ''}"
-																on:click={() => selectChatMachine(machine.id)}
-															>
-																<span class="truncate">{machine.name || machine.id}</span>
-																{#if effectiveMachineId === machine.id}
-																	<span class="text-amber-600 dark:text-amber-400">✓</span>
-																{/if}
-															</button>
-														{/each}
-														<button
-															type="button"
-															class="flex w-full items-center rounded-xl px-2 py-1.5 text-left text-[0.8125rem] text-gray-500 hover:bg-gray-50/40 dark:hover:bg-gray-800/40 {effectiveMachineId
-																? ''
-																: 'bg-gray-50/40 dark:bg-gray-800/40'}"
-															on:click={() => selectChatMachine(null)}
-														>
-															{$i18n.t('No machine')}
-														</button>
-													</DropdownMenu>
-												</div>
-											</Dropdown>
-											<span class="shrink-0 text-[0.6875rem] text-amber-600/80 dark:text-amber-400/70">
-												{$i18n.t('Applies next turn')}
-											</span>
-										</div>
-									</div>
-								{/if}
+										{/if}
 								<Messages
 										bind:this={messagesRef}
 										chatId={$chatId}
@@ -5591,8 +5620,11 @@
 										bind:this={runningSubAgents}
 										chatId={$chatId}
 										{history}
+										delegations={parentDelegations}
 										onOpenChild={openSubagentChild}
 										onSteerChild={steerSubagentChild}
+							onStopChild={stopSubagentChild}
+										onDismissChild={dismissSubagentChild}
 									/>
 								</div>
 								<div
@@ -5708,8 +5740,11 @@
 										bind:this={runningSubAgents}
 										chatId={$chatId}
 										{history}
+										delegations={parentDelegations}
 										onOpenChild={openSubagentChild}
 										onSteerChild={steerSubagentChild}
+							onStopChild={stopSubagentChild}
+										onDismissChild={dismissSubagentChild}
 									/>
 								</div>
 								<div id={embedded ? messageInputDropzoneId : undefined} class="pb-2 z-10">
@@ -5839,6 +5874,9 @@
 
 				{#if !embedded}
 					<ChatControls
+						delegations={parentDelegations}
+						onOpenChild={openSubagentChild}
+						onJumpToLaunch={jumpToDelegationLaunch}
 						bind:terminalContext
 						bind:history
 						bind:chatFiles

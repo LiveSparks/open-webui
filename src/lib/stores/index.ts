@@ -129,6 +129,10 @@ export const visiblePinnedModels = derived([pinnedModels, models], ([$pinnedMode
 );
 
 export const audioQueue = writable<AudioQueue | null>(null);
+// Cross-chat jump target (PR-squads sidebar sub-agents tab): set before
+// navigating to the parent chat; the Chat page consumes and clears it once
+// the target chat is loaded.
+export const jumpToMessage = writable<{ chatId: string; messageId: string } | null>(null);
 export const chatRequestQueues: Writable<
 	Record<string, { id: string; prompt: string; files: any[]; error?: string }[]>
 > = writable({});
