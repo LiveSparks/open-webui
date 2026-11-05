@@ -245,6 +245,7 @@ from open_webui.utils.chat import (
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
 )
+from open_webui.routers.agent import is_agent_model  # noqa: E402
 from open_webui.utils.chat_id import (
     get_temporary_chat_session_id,
     is_saved_chat_id,
@@ -1607,6 +1608,24 @@ async def chat_completion(
 
                     user_message = metadata.get('user_message') or {}
                     assistant_message_id = metadata.get('assistant_message_id')
+                    # Mid-turn steer (agent loop): a steer carries no user row and
+                    # names the turn that is already streaming. Reserving a turn
+                    # would 409 on the streaming node; the loop delivers the text
+                    # at pi's next turn boundary and the consumed steer lands
+                    # there as a normal user row.
+                    reserved_ids = [entry['message_id'] for entry in message_ids if entry.get('message_id')]
+                    messages_map = ((chat.chat or {}).get('history') or {}).get('messages') or {}
+                    mid_turn_steer = (
+                        not user_message
+                        and bool(reserved_ids)
+                        and is_agent_model(model_id)
+                        and all(
+                            (record := messages_map.get(mid)) is not None
+                            and record.get('role') == 'assistant'
+                            and record.get('done') is False
+                            for mid in reserved_ids
+                        )
+                    )
                     if assistant_message_id:
                         message = await Chats.get_message_by_id_and_message_id(chat_id, assistant_message_id)
                         if not message or (message.get('user_id') or chat.user_id) != user.id:
@@ -1614,7 +1633,7 @@ async def chat_completion(
                         if any(entry.get('message_id') != assistant_message_id for entry in message_ids):
                             raise HTTPException(status_code=400, detail='Invalid response ID.')
                         metadata['user_message_id'] = message.get('parentId')
-                    else:
+                    elif not mid_turn_steer:
                         turn = await Chats.insert_chat_turn(chat_id, user, user_message, message_ids)
                         event_emitter = await get_event_emitter(
                             {**metadata, 'message_id': turn['currentId']}, update_db=False

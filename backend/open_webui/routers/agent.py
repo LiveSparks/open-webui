@@ -192,6 +192,25 @@ async def queue_steer(redis, chat_id: str, entry: dict) -> None:
         log.exception('agent bridge: pending-steer bookkeeping failed for chat %s', chat_id)
 
 
+async def drop_queued_steer(redis, chat_id: str, text: str) -> None:
+    """Remove one pending steer without materializing it. The fall-through
+    path (run ended before the steer landed) persists the row itself, so its
+    trail must not fire the consumption path a second time."""
+    if not redis:
+        return
+    key = _STEER_PENDING_KEY.format(chat_id=chat_id)
+    try:
+        for raw in await redis.lrange(key, 0, -1):
+            try:
+                entry = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(entry, dict) and entry.get('text') == text:
+                await redis.lrem(key, 0, raw)
+    except Exception:
+        log.exception('agent bridge: steer drop failed for chat %s', chat_id)
+
+
 async def take_consumed_steers(redis, chat_id: str, pending: list[str]) -> tuple[list[dict], list[dict]]:
     """Settle the pending-steer trail against pi's current steering queue.
 
@@ -921,6 +940,35 @@ async def generate_agent_chat_completion(request: Request, form_data: dict, user
                 if session_info.get('running'):
                     disposition = await steer_session(client, chat_id, prompt_text)
                     steered = True
+                else:
+                    # The run ended between the running check and the steer
+                    # post, so this steer becomes an ordinary turn. The mid-run
+                    # steer skip left no rows behind, so build them here: the
+                    # steer row under its anchor turn plus a fresh assistant
+                    # node to stream into.
+                    fresh_assistant_id = str(uuid.uuid4())
+                    steer_row = {
+                        'id': str(uuid.uuid4()),
+                        'parentId': metadata.get('message_id') or None,
+                        'childrenIds': [],
+                        'role': 'user',
+                        'content': prompt_text,
+                        'user': {'id': user.id, 'name': user.name},
+                        'timestamp': int(time.time()),
+                    }
+                    try:
+                        await Chats.insert_chat_turn(
+                            chat_id,
+                            user,
+                            steer_row,
+                            [{'model_id': form_data.get('model') or '', 'message_id': fresh_assistant_id}],
+                        )
+                        metadata['message_id'] = fresh_assistant_id
+                        metadata['user_message_id'] = steer_row['id']
+                        metadata['user_message'] = steer_row
+                        await drop_queued_steer(request.app.state.redis, chat_id, prompt_text)
+                    except Exception:
+                        log.exception('agent bridge: steer fall-through turn reservation failed')
             if steered:
                 log.info('agent bridge: steered chat %s (%s)', chat_id, disposition)
                 # pi-parity bookkeeping: the record row lands at consumption
