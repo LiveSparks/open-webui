@@ -177,6 +177,21 @@ async def fork_session(client: httpx.AsyncClient, chat_id: str, keep_turns: int)
 
 
 _STEER_PENDING_KEY = 'agent:steer_pending:{chat_id}'
+# Deployments without redis keep the trail in process: a single backend
+# holds every loop turn, so the module map behaves like one trail store.
+_STEER_TRAIL: dict[str, list[dict]] = {}
+
+
+async def _trail_load(redis, chat_id: str) -> tuple[list[dict], bool]:
+    """Read a chat's trail; second value says whether redis owns it."""
+    key = _STEER_PENDING_KEY.format(chat_id=chat_id)
+    if redis:
+        try:
+            return [json.loads(raw) for raw in await redis.lrange(key, 0, -1) if raw], True
+        except Exception:
+            log.exception('agent bridge: pending-steer read failed for chat %s', chat_id)
+            return [], True
+    return list(_STEER_TRAIL.get(key, [])), False
 
 
 async def queue_steer(redis, chat_id: str, entry: dict) -> None:
@@ -186,8 +201,12 @@ async def queue_steer(redis, chat_id: str, entry: dict) -> None:
     texts); this trail records what was queued against which turn, so the
     diff at consumption can insert the normal user message the steered turn
     deserves. Best effort: a lost entry only loses the visible row."""
+    key = _STEER_PENDING_KEY.format(chat_id=chat_id)
     try:
-        await redis.rpush(_STEER_PENDING_KEY.format(chat_id=chat_id), json.dumps(entry))
+        if redis:
+            await redis.rpush(key, json.dumps(entry))
+        else:
+            _STEER_TRAIL.setdefault(key, []).append(entry)
     except Exception:
         log.exception('agent bridge: pending-steer bookkeeping failed for chat %s', chat_id)
 
@@ -196,19 +215,20 @@ async def drop_queued_steer(redis, chat_id: str, text: str) -> None:
     """Remove one pending steer without materializing it. The fall-through
     path (run ended before the steer landed) persists the row itself, so its
     trail must not fire the consumption path a second time."""
-    if not redis:
-        return
     key = _STEER_PENDING_KEY.format(chat_id=chat_id)
-    try:
-        for raw in await redis.lrange(key, 0, -1):
-            try:
-                entry = json.loads(raw)
-            except Exception:
-                continue
-            if isinstance(entry, dict) and entry.get('text') == text:
-                await redis.lrem(key, 0, raw)
-    except Exception:
-        log.exception('agent bridge: steer drop failed for chat %s', chat_id)
+    if redis:
+        try:
+            for raw in await redis.lrange(key, 0, -1):
+                try:
+                    entry = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(entry, dict) and entry.get('text') == text:
+                    await redis.lrem(key, 0, raw)
+        except Exception:
+            log.exception('agent bridge: steer drop failed for chat %s', chat_id)
+        return
+    _STEER_TRAIL[key] = [entry for entry in _STEER_TRAIL.get(key, []) if entry.get('text') != text]
 
 
 async def take_consumed_steers(redis, chat_id: str, pending: list[str]) -> tuple[list[dict], list[dict]]:
@@ -220,10 +240,8 @@ async def take_consumed_steers(redis, chat_id: str, pending: list[str]) -> tuple
     from collections import Counter
 
     key = _STEER_PENDING_KEY.format(chat_id=chat_id)
-    try:
-        stored = [json.loads(raw) for raw in await redis.lrange(key, 0, -1) if raw]
-    except Exception:
-        log.exception('agent bridge: pending-steer read failed for chat %s', chat_id)
+    stored, stored_in_redis = _trail_load(redis, chat_id)
+    if not stored:
         return [], []
 
     counts = Counter(pending)
@@ -237,11 +255,14 @@ async def take_consumed_steers(redis, chat_id: str, pending: list[str]) -> tuple
             remaining.append(entry)
         else:
             consumed.append(entry)
-    for entry in consumed:
-        try:
-            await redis.lrem(key, 1, json.dumps(entry))
-        except Exception:
-            pass
+    if stored_in_redis:
+        for entry in consumed:
+            try:
+                await redis.lrem(key, 1, json.dumps(entry))
+            except Exception:
+                pass
+    else:
+        _STEER_TRAIL[key] = remaining
     return consumed, remaining
 
 
