@@ -6,6 +6,9 @@ The engine functions come from `community-scripts/core` (MIT); only the two
 script files in this directory are fork-specific, selected with the
 `COMMUNITY_SCRIPTS_URL` override the engine documents for forks.
 
+The live box (openwebui-pi / 192.168.18.220) and the release path that feeds
+it are documented in `docs/deploy/lxc-220.md`.
+
 ## Create
 
 From the Proxmox VE host:
