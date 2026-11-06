@@ -27,15 +27,21 @@ PYTHON_VERSION="3.11" setup_uv
 PI_WHEEL_URL="${PI_WHEEL_URL:-https://github.com/LiveSparks/open-webui/releases/latest/download/open_webui-0.12.3-py3-none-any.whl}"
 OWUI_PORT="${OWUI_PORT:-8080}"
 
+# Local embeddings for knowledge + memory ride the pyproject `local-embeddings`
+# extra via --with (uv tool install has no --extra). Keep the pins in sync with
+# that extra. UV_TORCH_BACKEND=cpu must stay: PyPI's linux torch wheels bundle
+# CUDA and drag in several GB of nvidia packages; the CPU index wheel is ~180MB.
+EMBED_ARGS=(--with 'torch<=2.9.1' --with 'sentence-transformers==5.5.1' --with 'accelerate==1.13.0')
+
 msg_info "Installing Open WebUI wheel"
 installed=0
 for attempt in 1 2; do
-  $STD uv tool install --python 3.11 "$PI_WHEEL_URL" && { installed=1; break; }
+  $STD env UV_TORCH_BACKEND=cpu uv tool install --python 3.11 "${EMBED_ARGS[@]}" "$PI_WHEEL_URL" && { installed=1; break; }
   msg_warn "Open WebUI install attempt $attempt failed, retrying..."
   sleep 10
 done
-((installed)) || $STD uv tool install --python 3.11 "$PI_WHEEL_URL"
-msg_ok "Installed Open WebUI wheel"
+((installed)) || $STD env UV_TORCH_BACKEND=cpu uv tool install --python 3.11 "${EMBED_ARGS[@]}" "$PI_WHEEL_URL"
+msg_ok "Installed Open WebUI wheel (including local-embeddings model set)"
 
 msg_info "Creating data and backup directories"
 mkdir -p /var/lib/open-webui /var/backups/open-webui /var/lib/open-webui/pi-agent /var/lib/open-webui/pi_sessions
@@ -87,7 +93,12 @@ echo "Installing wheel from $PI_WHEEL_URL"
 # --refresh: uv keys its download cache on the URL, and the moving
 # releases/latest URL keeps its name across releases - without the flag an
 # update can install the previous release's cached bytes and still exit 0.
-uv tool install --force --refresh --python 3.11 "$PI_WHEEL_URL"
+# The --with set must stay in sync with the install script's EMBED_ARGS and
+# the pyproject local-embeddings extra; UV_TORCH_BACKEND=cpu keeps torch off
+# the CUDA wheel set.
+UV_TORCH_BACKEND=cpu uv tool install --force --refresh --python 3.11 \
+  --with 'torch<=2.9.1' --with 'sentence-transformers==5.5.1' --with 'accelerate==1.13.0' \
+  "$PI_WHEEL_URL"
 systemctl start open-webui
 
 for _ in $(seq 1 60); do
